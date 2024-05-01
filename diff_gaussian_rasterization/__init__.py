@@ -12,7 +12,19 @@
 from typing import NamedTuple
 import torch.nn as nn
 import torch
-from . import _C
+import os
+from torch.utils.cpp_extension import load
+
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+extra_opts = ["-I" + os.path.join(base_dir, "third_party/glm/")]
+_C = load(name="ray_rasterizer",
+            sources=[
+            os.path.join(base_dir,"cuda_rasterizer/rasterizer_impl.cu"),
+            os.path.join(base_dir,"cuda_rasterizer/forward.cu"),
+            os.path.join(base_dir,"cuda_rasterizer/backward.cu"),
+            os.path.join(base_dir,"rasterize_points.cu"),
+            os.path.join(base_dir,"ext.cu")],
+            extra_cuda_cflags=extra_opts)
 
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
