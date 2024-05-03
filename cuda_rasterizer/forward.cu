@@ -9,6 +9,7 @@
  * For inquiries contact  george.drettakis@inria.fr
  */
 
+#include <tuple>
 #include "forward.h"
 #include "auxiliary.h"
 #include <cooperative_groups.h>
@@ -231,6 +232,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
 	float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
 	float2 point_image = { ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H) };
+	// printf("IDX:%d Radius:%f, Px:%f, Py:%f, L1:%f, L2:%f, cov00:%f, cov01:%f, cov11:%f\n", idx, my_radius, point_image.x, point_image.y, lambda1, lambda2, cov.x, cov.y, cov.z);
 	uint2 rect_min, rect_max;
 	getRect(point_image, my_radius, rect_min, rect_max, grid);
 	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
@@ -368,9 +370,231 @@ renderCUDA(
 	{
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
+
+		// if (last_contributor > 0) printf("Pix (%d, %d): %d\n", pix.x, pix.y, last_contributor);
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 	}
+}
+
+struct HitInfo {
+	 bool hit;
+	 float t_near;
+	 float t_far;
+	 int obj_idx;
+};
+
+__device__ struct HitInfo ray_bbox_intersect(
+    glm::vec3 ray_pos,
+    glm::vec3 ray_dir_inv,
+	const struct bvh_aabb* bvh_aabbs,
+	int bvh_idx,
+    float bound_near,
+    float bound_far
+) {
+    glm::vec3 bbox_min(bvh_aabbs[bvh_idx].x_min, bvh_aabbs[bvh_idx].y_min, bvh_aabbs[bvh_idx].z_min);
+    glm::vec3 bbox_max(bvh_aabbs[bvh_idx].x_max, bvh_aabbs[bvh_idx].y_max, bvh_aabbs[bvh_idx].z_max);
+
+	struct HitInfo h;
+	h.hit = false;
+	h.t_near = FLT_MAX;
+	h.obj_idx = bvh_idx;
+
+    glm::vec3 t_min = (bbox_min - ray_pos) * ray_dir_inv;
+    glm::vec3 t_max = (bbox_max - ray_pos) * ray_dir_inv;
+
+    glm::vec3 t1 = glm::min(t_min, t_max);
+    glm::vec3 t2 = glm::max(t_min, t_max);
+
+    float t_near = fmaxf(fmaxf(t1.x, t1.y), t1.z);
+    float t_far = fminf(fminf(t2.x, t2.y), t2.z);
+    h.t_near = t_near;
+    h.t_far = t_far;
+
+    if (t_far < 0) {
+    	return h;
+    }
+    if (t_near > t_far) {
+    	return h;
+    }
+    if (t_far < bound_near || t_near > bound_far) {
+    	return h;
+    }
+    h.hit = true;
+    return h;
+}
+
+struct stack_entry {
+	int idx;
+	float t_near;
+	float t_far;
+};
+
+__global__ void ray_render_cuda (
+	const int P,
+	const int W,
+	const int H,
+	// Information needed by ray tracer
+	const float znear,
+	const float zfar,
+	const float* viewmatrix,
+	const float* viewmatrix_inv,
+	const float* projmatrix,
+	const float tanfovx,
+	const float tanfovy,
+	const glm::vec3* cam_pos,
+	const int BVH_N,
+	const struct bvh_node* bvh_nodes,
+	const struct bvh_aabb* bvh_aabbs,
+	// Information used to compute 2D projection color
+	float2* means2D,
+	const float* colors_precomp,
+	float4* conic_opacity,
+	// Output
+	float* out_color
+) {
+	int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
+	if (pixel_id >= W * H) { // Outside number of pixels
+		return;
+	}
+	int pixel_x_coord = pixel_id % W;
+	int pixel_y_coord = pixel_id / W;
+
+	// Compute camera frustrum and pixel coordinates in view space
+	float top = tanfovy * 1.0;
+	float right = tanfovx * 1.0;
+
+	float pixel_view_x = right * 2.0 * ((float)(pixel_x_coord + 0.5) / (float)W) - right;
+	float pixel_view_y = top * 2.0 * ((float)(pixel_y_coord + 0.5) / (float)H) - top;
+	float3 pixel_v = { pixel_view_x, pixel_view_y, 1.0 };
+	float3 pixel_w = transformPoint4x3(pixel_v, viewmatrix_inv);
+	glm::vec3 pixel_w_vec(pixel_w.x, pixel_w.y, pixel_w.z);
+
+	// Cast a ray from cam_pos to pixel_w (in world space), and ray trace!
+	glm::vec3 ray_pos = *cam_pos;
+	glm::vec3 ray_dir = glm::normalize(pixel_w_vec - ray_pos);
+	glm::vec3 ray_dir_inv = glm::vec3(1.0f) / ray_dir;
+
+	// printf("Camera position %f %f %f\n", ray_pos.x, ray_pos.y, ray_pos.z);
+	// printf("Pixel coord %f %f %f\n", pixel_w_vec.x, pixel_w_vec.y, pixel_w_vec.z);
+
+	const int BVH_STACK_SIZE = 1024;
+
+	// Current alpha composing "state"
+	float alpha = 0.0;
+
+	// Data structures for storing intersections
+	struct stack_entry stack[BVH_STACK_SIZE];
+	int stack_pointer = 0;
+	int intersection_idx;
+	float intersection_t_near;
+	float intersection_t_far;
+
+	float min_t_near = -FLT_MAX;
+
+	int n = 0;
+
+	intersection_idx = -1;
+	intersection_t_near = FLT_MAX;
+	intersection_t_far = -FLT_MAX;
+	stack[stack_pointer++] = { .idx=0, .t_near=0.0, .t_far=0.0 };
+	while (stack_pointer > 0) {
+		if (stack_pointer >= BVH_STACK_SIZE) {
+			printf("WTF STACK OVERFLOW\n");
+		}
+		struct stack_entry cur = stack[--stack_pointer];
+		int node_addr = cur.idx;
+		float node_t_near = cur.t_near;
+		float node_t_far = cur.t_far;
+
+		// if (node_t_near >= intersection_t_near) { // Found a closer intersection already, so skip this node
+		// 	continue;
+		// }
+
+		if (bvh_nodes[node_addr].object_idx != -1) { // Is a leaf node
+			// printf("Found leaf. Pixel %d %d. Node %d AABB is (%f, %f, %f) (%f, %f, %f), for object %d at times (%f, %f)\n", pixel_x_coord, pixel_y_coord, node_addr, bvh_aabbs[node_addr].x_min, bvh_aabbs[node_addr].y_min, bvh_aabbs[node_addr].z_min, bvh_aabbs[node_addr].x_max, bvh_aabbs[node_addr].y_max, bvh_aabbs[node_addr].z_max, bvh_nodes[node_addr].object_idx, node_t_near, node_t_far);
+			n++;
+			if (node_t_near < intersection_t_near) {
+				intersection_t_near = node_t_near;
+				intersection_t_far = node_t_far;
+				intersection_idx = bvh_nodes[node_addr].object_idx;
+			}
+		} else {
+			int left_idx = bvh_nodes[node_addr].left_idx;
+			int right_idx = bvh_nodes[node_addr].right_idx;
+			HitInfo h1 = ray_bbox_intersect(ray_pos, ray_dir_inv, bvh_aabbs, left_idx, 0.0, FLT_MAX);
+			HitInfo h2 = ray_bbox_intersect(ray_pos, ray_dir_inv, bvh_aabbs, right_idx, 0.0, FLT_MAX);
+			// int first_idx = (h1.t_near < h2.t_near) ? left_idx : right_idx;
+			// int second_idx = (h1.t_near < h2.t_near) ? right_idx : left_idx;
+			// bool hit_first = (h1.t_near < h2.t_near) ? h1.hit : h2.hit;
+			// bool hit_second = (h1.t_near < h2.t_near) ? h2.hit : h1.hit;
+			// float first_t_near = (h1.t_near < h2.t_near) ? h1.t_near : h2.t_near;
+			// float second_t_near = (h1.t_near < h2.t_near) ? h2.t_near : h1.t_near;
+			// float first_t_far = (h1.t_near < h2.t_near) ? h1.t_far : h2.t_far;
+			// float second_t_far = (h1.t_near < h2.t_near) ? h2.t_far : h1.t_far;
+
+			// if (hit_second) {
+			// 	stack[stack_pointer++] = { .idx=second_idx, .t_near=second_t_near, .t_far=second_t_far };
+			// }
+			// if (hit_first) {
+			// 	stack[stack_pointer++] = { .idx=first_idx, .t_near=first_t_near, .t_far=first_t_far };
+			// }
+			if (h1.hit) {
+				stack[stack_pointer++] = { .idx=left_idx, .t_near=h1.t_near, .t_far=h1.t_far };
+			}
+			if (h2.hit) {
+				stack[stack_pointer++] = { .idx=right_idx, .t_near=h2.t_near, .t_far=h2.t_far };
+			}
+		}
+	}
+
+	// if (n > 0) printf("Total intersections for pixel (%d, %d): %d\n", pixel_x_coord, pixel_y_coord, n);
+}
+
+void FORWARD::ray_render(
+	const int P,
+	const int W,
+	const int H,
+	// Information needed by ray tracer
+	const float znear,
+	const float zfar,
+	const float* viewmatrix,
+	const float* viewmatrix_inv,
+	const float* projmatrix,
+	const float tanfovx,
+	const float tanfovy,
+	const glm::vec3* cam_pos,
+	const int BVH_N,
+	const struct bvh_node* bvh_nodes,
+	const struct bvh_aabb* bvh_aabbs,
+	// Information used to compute 2D projection color
+	float2* means2D,
+	const float* colors_precomp,
+	float4* conic_opacity,
+	// Output
+	float* out_color)
+{
+	printf("Ray render %d x %d\n", W, H);
+	int threads_per_block = 256;
+	int num_blocks = (W * H + threads_per_block - 1) / threads_per_block;
+	ray_render_cuda <<<num_blocks, threads_per_block>>> (
+		P, W, H,
+		znear, zfar,
+		viewmatrix,
+		viewmatrix_inv,
+		projmatrix,
+		tanfovx,
+		tanfovy,
+		cam_pos,
+		BVH_N,
+		bvh_nodes,
+		bvh_aabbs,
+		means2D,
+		colors_precomp,
+		conic_opacity,
+		out_color
+	);
+	printf("Ray render done\n");
 }
 
 void FORWARD::render(

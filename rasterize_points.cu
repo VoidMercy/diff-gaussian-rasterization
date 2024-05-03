@@ -42,7 +42,10 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& rotations,
 	const float scale_modifier,
 	const torch::Tensor& cov3D_precomp,
+	const float znear,
+	const float zfar,
 	const torch::Tensor& viewmatrix,
+	const torch::Tensor& viewmatrix_inv,
 	const torch::Tensor& projmatrix,
 	const float tan_fovx, 
 	const float tan_fovy,
@@ -52,6 +55,9 @@ RasterizeGaussiansCUDA(
 	const int degree,
 	const torch::Tensor& campos,
 	const bool prefiltered,
+	// Ray tracing strucrures
+	const torch::Tensor& bvh_nodes,
+	const torch::Tensor& bvh_aabbs,
 	const bool debug)
 {
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
@@ -61,6 +67,7 @@ RasterizeGaussiansCUDA(
   const int P = means3D.size(0);
   const int H = image_height;
   const int W = image_width;
+  const int BVH_N = bvh_nodes.size(0);
 
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
@@ -101,12 +108,19 @@ RasterizeGaussiansCUDA(
 		scale_modifier,
 		rotations.contiguous().data_ptr<float>(),
 		cov3D_precomp.contiguous().data<float>(), 
+		znear,
+		zfar,
 		viewmatrix.contiguous().data<float>(), 
+		viewmatrix_inv.contiguous().data<float>(), 
 		projmatrix.contiguous().data<float>(),
 		campos.contiguous().data<float>(),
 		tan_fovx,
 		tan_fovy,
 		prefiltered,
+		// Information for ray tracer
+		BVH_N,
+		bvh_nodes.contiguous().data<int>(),
+		bvh_aabbs.contiguous().data<float>(),
 		out_color.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
 		debug);

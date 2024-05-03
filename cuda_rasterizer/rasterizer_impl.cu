@@ -210,11 +210,19 @@ int CudaRasterizer::Rasterizer::forward(
 	const float scale_modifier,
 	const float* rotations,
 	const float* cov3D_precomp,
+	const float znear,
+	const float zfar,
 	const float* viewmatrix,
+	const float* viewmatrix_inv,
 	const float* projmatrix,
 	const float* cam_pos,
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
+	// Information for ray tracer
+	const int BVH_N,
+	const int* bvh_nodes,
+	const float* bvh_aabbs,
+
 	float* out_color,
 	int* radii,
 	bool debug)
@@ -270,6 +278,27 @@ int CudaRasterizer::Rasterizer::forward(
 		tile_grid,
 		geomState.tiles_touched,
 		prefiltered
+	), debug)
+
+	CHECK_CUDA(FORWARD::ray_render(
+		P, width, height,
+		// Information needed by ray tracer
+		znear, zfar,
+		viewmatrix,
+		viewmatrix_inv,
+		projmatrix,
+		tan_fovx,
+		tan_fovy,
+		(glm::vec3*)cam_pos,
+		BVH_N,
+		(const struct bvh_node *)bvh_nodes,
+		(const struct bvh_aabb *)bvh_aabbs,
+		// Information used to compute 2D projection color
+		geomState.means2D,
+		colors_precomp,
+		geomState.conic_opacity,
+		// Outputs
+		out_color
 	), debug)
 
 	// Compute prefix sum over full list of touched tile counts by Gaussians

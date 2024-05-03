@@ -15,6 +15,7 @@
 #include <cuda.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include "auxiliary.h"
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
 
@@ -59,6 +60,29 @@ namespace FORWARD
 		float* final_T,
 		uint32_t* n_contrib,
 		const float* bg_color,
+		float* out_color);
+
+	void ray_render(
+		const int P,
+		const int W,
+		const int H,
+		// Information needed by ray tracer
+		const float znear,
+		const float zfar,
+		const float* viewmatrix,
+		const float* viewmatrix_inv,
+		const float* projmatrix,
+		const float tanfovx,
+		const float tanfovy,
+		const glm::vec3* cam_pos,
+		const int BVH_N,
+		const struct bvh_node* bvh_nodes,
+		const struct bvh_aabb* bvh_aabbs,
+		// Information used to compute 2D projection color
+		float2* means2D,
+		const float* colors_precomp,
+		float4* conic_opacity,
+		// Output
 		float* out_color);
 }
 

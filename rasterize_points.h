@@ -25,7 +25,10 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& rotations,
 	const float scale_modifier,
 	const torch::Tensor& cov3D_precomp,
+	const float znear,
+	const float zfar,
 	const torch::Tensor& viewmatrix,
+	const torch::Tensor& viewmatrix_inv,
 	const torch::Tensor& projmatrix,
 	const float tan_fovx, 
 	const float tan_fovy,
@@ -35,6 +38,8 @@ RasterizeGaussiansCUDA(
 	const int degree,
 	const torch::Tensor& campos,
 	const bool prefiltered,
+	const torch::Tensor& bvh_nodes,
+	const torch::Tensor& bvh_aabbs,
 	const bool debug);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
