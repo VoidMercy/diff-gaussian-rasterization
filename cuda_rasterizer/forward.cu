@@ -469,12 +469,14 @@ __device__ float3 ray_render_composing(
         float alpha = min(exp(power) * con_o.w, 0.99f);
         if (alpha < 1.0f / 255.0f)
 			continue;	// Skip if alpha is too small
-		if (1.0f * (1 - alpha) < 0.0001f) {
+		if (1 - alpha < 0.0001f) {
 			break; 		// Break if alpha value saturates
 		}
 
         // Alpha compositing from front to back
-        accumulated_color = gaussian_color * alpha + accumulated_color * (1.0f - alpha);
+        accumulated_color.x = gaussian_color.x * alpha + accumulated_color.x * (1.0f - alpha);
+        accumulated_color.y = gaussian_color.y * alpha + accumulated_color.y * (1.0f - alpha);
+        accumulated_color.z = gaussian_color.z * alpha + accumulated_color.z * (1.0f - alpha);
         accumulated_alpha += alpha * (1.0f - accumulated_alpha);
     }
 

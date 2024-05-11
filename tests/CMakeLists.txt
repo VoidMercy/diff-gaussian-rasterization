@@ -14,6 +14,4 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/glm)
 add_executable(TestRasterizer forward_test.cu)
 
 # If the tests need to link against the main CudaRasterizer library or any other libraries:
-target_link_libraries(TestRasterizer 
-    CudaRasterizer
-)
+target_link_libraries(TestRasterizer PRIVATE CudaRasterizer)
