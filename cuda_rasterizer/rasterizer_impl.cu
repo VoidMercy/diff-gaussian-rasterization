@@ -297,7 +297,7 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.means2D,
 		background,
 		geomState.depths,
-		colors_precomp,
+		(colors_precomp != nullptr ? colors_precomp : geomState.rgb),
 		geomState.conic_opacity,
 		// Outputs
 		out_color

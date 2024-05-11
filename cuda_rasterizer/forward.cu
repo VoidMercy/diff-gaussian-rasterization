@@ -452,7 +452,7 @@ __device__ void ray_render_composing (
     float accumulated_alpha = 0.0f;
 
 	// Sort the Gaussians by depth
-	quickSort(gaussians, depths, 0, N_GAUSSIANS - 1);
+	// quickSort(gaussians, depths, 0, N_GAUSSIANS - 1);
 
     for (int i = 0; i < N_GAUSSIANS; i++) {
         int index = gaussians[i];
@@ -611,7 +611,6 @@ __global__ void ray_render_cuda(
 	}
 
 	if (gaussian_idx > 0) {
-		printf("Total intersections for pixel (%d, %d): %d. Color: (%f, %f, %f)\n", pixel_x_coord, pixel_y_coord, gaussian_idx, out_color[pixel_id], out_color[H * W + pixel_id], out_color[2 * H * W + pixel_id]);
 		ray_render_composing<CHANNELS>(
 			pixel_x_coord,
 			pixel_y_coord,
@@ -626,6 +625,7 @@ __global__ void ray_render_cuda(
 			conic_opacity,
 			out_color
 		);
+		printf("Total intersections for pixel (%d, %d): %d. Color: (%f, %f, %f)\n", pixel_x_coord, pixel_y_coord, gaussian_idx, out_color[pixel_id], out_color[H * W + pixel_id], out_color[2 * H * W + pixel_id]);
 	}
 }
 
@@ -654,7 +654,7 @@ void FORWARD::ray_render(
 	// Output
 	float* out_color)
 {
-	printf("Ray render %d x %d\n", W, H);
+	printf("Ray render %d x %d for %d channels\n", W, H, NUM_CHANNELS);
 	int threads_per_block = 256;
 	int num_blocks = (W * H + threads_per_block - 1) / threads_per_block;
 	ray_render_cuda<NUM_CHANNELS> <<<num_blocks, threads_per_block>>> (
