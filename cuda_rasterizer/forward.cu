@@ -430,20 +430,25 @@ struct stack_entry {
 	float t_far;
 };
 
-__device__ float3 ray_render_composing(
+template <uint32_t CHANNELS>
+__device__ void ray_render_composing (
     // The coordinate of the current point being computed
     int x,
     int y,
+    const int H, // height of image
+    const int W, // width of image
     // Array of 2D gaussians
     const int N_GAUSSIANS,   	// the number of Gaussians
     int *gaussians,          	// the index array of Gaussians; should be sorted by depth
     float *depths,            	// depths to sort the Gaussians
     float2 *mean2D,          	// the mean which is where it's located in 2D space
-    float *cov2D,            	// the covariances of the Gaussian
+    const float *bg_color,            // color of background
     const float* colors_precomp,// the computed color 
-    float4* conic_opacity    	// the opacity
+    float4* conic_opacity,   	// the opacity
+    float *out_color            // output color
 ) {
-    float3 accumulated_color = {0.0f, 0.0f, 0.0f};
+
+	float accumulated_color[CHANNELS] = { 0.0f };
     float accumulated_alpha = 0.0f;
 
 	// Sort the Gaussians by depth
@@ -451,11 +456,6 @@ __device__ float3 ray_render_composing(
 
     for (int i = 0; i < N_GAUSSIANS; i++) {
         int index = gaussians[i];
-        float3 gaussian_color = {
-            colors_precomp[index * 3],     // R
-            colors_precomp[index * 3 + 1], // G
-            colors_precomp[index * 3 + 2]  // B
-        };
         float4 con_o = conic_opacity[index];
         float2 gaussian_mean = mean2D[index];
 
@@ -473,17 +473,21 @@ __device__ float3 ray_render_composing(
 			break; 		// Break if alpha value saturates
 		}
 
-        // Alpha compositing from front to back
-        accumulated_color.x = gaussian_color.x * alpha + accumulated_color.x * (1.0f - alpha);
-        accumulated_color.y = gaussian_color.y * alpha + accumulated_color.y * (1.0f - alpha);
-        accumulated_color.z = gaussian_color.z * alpha + accumulated_color.z * (1.0f - alpha);
+		for (int ch = 0; ch < CHANNELS; ch++) {
+			accumulated_color[ch] = colors_precomp[index * CHANNELS + ch] * alpha + accumulated_color[ch] * (1.0f - alpha);
+		}
+
         accumulated_alpha += alpha * (1.0f - accumulated_alpha);
     }
 
-    return accumulated_color;
+    int pix_id = y * W + x;
+    for (int ch = 0; ch < CHANNELS; ch++) {
+		out_color[ch * H * W + pix_id] = accumulated_color[ch];
+    }
 }
 
-__global__ void ray_render_cuda (
+template <uint32_t CHANNELS>
+__global__ void ray_render_cuda(
 	const int P,
 	const int W,
 	const int H,
@@ -501,6 +505,8 @@ __global__ void ray_render_cuda (
 	const struct bvh_aabb* bvh_aabbs,
 	// Information used to compute 2D projection color
 	float2* means2D,
+	const float* bg_color,
+	float *depths,
 	const float* colors_precomp,
 	float4* conic_opacity,
 	// Output
@@ -532,9 +538,11 @@ __global__ void ray_render_cuda (
 	// printf("Pixel coord %f %f %f\n", pixel_w_vec.x, pixel_w_vec.y, pixel_w_vec.z);
 
 	const int BVH_STACK_SIZE = 1024;
+	const int MAX_GAUSSIANS = 1024;
 
-	// Current alpha composing "state"
-	float alpha = 0.0;
+	// Gaussians
+	int gaussians[MAX_GAUSSIANS];
+	int gaussian_idx = 0;
 
 	// Data structures for storing intersections
 	struct stack_entry stack[BVH_STACK_SIZE];
@@ -544,8 +552,6 @@ __global__ void ray_render_cuda (
 	float intersection_t_far;
 
 	float min_t_near = -FLT_MAX;
-
-	int n = 0;
 
 	intersection_idx = -1;
 	intersection_t_near = FLT_MAX;
@@ -566,7 +572,10 @@ __global__ void ray_render_cuda (
 
 		if (bvh_nodes[node_addr].object_idx != -1) { // Is a leaf node
 			// printf("Found leaf. Pixel %d %d. Node %d AABB is (%f, %f, %f) (%f, %f, %f), for object %d at times (%f, %f)\n", pixel_x_coord, pixel_y_coord, node_addr, bvh_aabbs[node_addr].x_min, bvh_aabbs[node_addr].y_min, bvh_aabbs[node_addr].z_min, bvh_aabbs[node_addr].x_max, bvh_aabbs[node_addr].y_max, bvh_aabbs[node_addr].z_max, bvh_nodes[node_addr].object_idx, node_t_near, node_t_far);
-			n++;
+			gaussians[gaussian_idx++] = bvh_nodes[node_addr].object_idx;
+			if (gaussian_idx == MAX_GAUSSIANS) {
+				break;
+			}
 			if (node_t_near < intersection_t_near) {
 				intersection_t_near = node_t_near;
 				intersection_t_far = node_t_far;
@@ -601,7 +610,23 @@ __global__ void ray_render_cuda (
 		}
 	}
 
-	// if (n > 0) printf("Total intersections for pixel (%d, %d): %d\n", pixel_x_coord, pixel_y_coord, n);
+	if (gaussian_idx > 0) {
+		printf("Total intersections for pixel (%d, %d): %d. Color: (%f, %f, %f)\n", pixel_x_coord, pixel_y_coord, gaussian_idx, out_color[pixel_id], out_color[H * W + pixel_id], out_color[2 * H * W + pixel_id]);
+		ray_render_composing<CHANNELS>(
+			pixel_x_coord,
+			pixel_y_coord,
+			H,
+			W,
+			gaussian_idx,
+			gaussians,
+			depths,
+			means2D,
+			bg_color,
+			colors_precomp,
+			conic_opacity,
+			out_color
+		);
+	}
 }
 
 void FORWARD::ray_render(
@@ -622,6 +647,8 @@ void FORWARD::ray_render(
 	const struct bvh_aabb* bvh_aabbs,
 	// Information used to compute 2D projection color
 	float2* means2D,
+	const float* bg_color,
+	float *depths,
 	const float* colors_precomp,
 	float4* conic_opacity,
 	// Output
@@ -630,7 +657,7 @@ void FORWARD::ray_render(
 	printf("Ray render %d x %d\n", W, H);
 	int threads_per_block = 256;
 	int num_blocks = (W * H + threads_per_block - 1) / threads_per_block;
-	ray_render_cuda <<<num_blocks, threads_per_block>>> (
+	ray_render_cuda<NUM_CHANNELS> <<<num_blocks, threads_per_block>>> (
 		P, W, H,
 		znear, zfar,
 		viewmatrix,
@@ -643,6 +670,8 @@ void FORWARD::ray_render(
 		bvh_nodes,
 		bvh_aabbs,
 		means2D,
+		bg_color,
+		depths,
 		colors_precomp,
 		conic_opacity,
 		out_color

@@ -80,6 +80,8 @@ namespace FORWARD
 		const struct bvh_aabb* bvh_aabbs,
 		// Information used to compute 2D projection color
 		float2* means2D,
+		const float* bg_color,
+		float* depths,
 		const float* colors_precomp,
 		float4* conic_opacity,
 		// Output
