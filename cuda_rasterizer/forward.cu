@@ -430,6 +430,57 @@ struct stack_entry {
 	float t_far;
 };
 
+__device__ float3 ray_render_composing(
+    // The coordinate of the current point being computed
+    int x,
+    int y,
+    // Array of 2D gaussians
+    const int N_GAUSSIANS,   	// the number of Gaussians
+    int *gaussians,          	// the index array of Gaussians; should be sorted by depth
+    float *depths,            	// depths to sort the Gaussians
+    float2 *mean2D,          	// the mean which is where it's located in 2D space
+    float *cov2D,            	// the covariances of the Gaussian
+    const float* colors_precomp,// the computed color 
+    float4* conic_opacity    	// the opacity
+) {
+    float3 accumulated_color = {0.0f, 0.0f, 0.0f};
+    float accumulated_alpha = 0.0f;
+
+	// Sort the Gaussians by depth
+	quickSort(gaussians, depths, 0, N_GAUSSIANS - 1);
+
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+        int index = gaussians[i];
+        float3 gaussian_color = {
+            colors_precomp[index * 3],     // R
+            colors_precomp[index * 3 + 1], // G
+            colors_precomp[index * 3 + 2]  // B
+        };
+        float4 con_o = conic_opacity[index];
+        float2 gaussian_mean = mean2D[index];
+
+        // Compute power using conic matrix (cf. "Surface Splatting" by Zwicker et al., 2001)
+        float2 d = {x - gaussian_mean.x, y - gaussian_mean.y};
+        float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+        if (power > 0.0f)
+            continue;
+
+        // Compute alpha using the exponential of power and the Gaussian opacity
+        float alpha = min(exp(power) * con_o.w, 0.99f);
+        if (alpha < 1.0f / 255.0f)
+			continue;	// Skip if alpha is too small
+		if (1.0f * (1 - alpha) < 0.0001f) {
+			break; 		// Break if alpha value saturates
+		}
+
+        // Alpha compositing from front to back
+        accumulated_color = gaussian_color * alpha + accumulated_color * (1.0f - alpha);
+        accumulated_alpha += alpha * (1.0f - accumulated_alpha);
+    }
+
+    return accumulated_color;
+}
+
 __global__ void ray_render_cuda (
 	const int P,
 	const int W,

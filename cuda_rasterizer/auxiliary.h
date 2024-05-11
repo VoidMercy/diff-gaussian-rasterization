@@ -180,6 +180,39 @@ __forceinline__ __device__ bool in_frustum(int idx,
 	return true;
 }
 
+__forceinline__ __device__ void quickSort(int* arr, float* depths, int left, int right) {
+    int i = left, j = right;
+    float tmpDepth;
+    int tmpIndex;
+    float pivot = depths[(left + right) / 2];
+
+    while (i <= j) {
+        while (depths[i] < pivot)
+            i++;
+        while (depths[j] > pivot)
+            j--;
+        if (i <= j) {
+            // Swap depths
+            tmpDepth = depths[i];
+            depths[i] = depths[j];
+            depths[j] = tmpDepth;
+
+            // Swap indices
+            tmpIndex = arr[i];
+            arr[i] = arr[j];
+            arr[j] = tmpIndex;
+
+            i++;
+            j--;
+        }
+    };
+
+    if (left < j)
+        quickSort(arr, depths, left, j);
+    if (i < right)
+        quickSort(arr, depths, i, right);
+}
+
 #define CHECK_CUDA(A, debug) \
 A; if(debug) { \
 auto ret = cudaDeviceSynchronize(); \
