@@ -14,6 +14,8 @@
 #include "auxiliary.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <thrust/sort.h>
+#include <thrust/execution_policy.h>
 namespace cg = cooperative_groups;
 
 // Forward method for converting the input spherical harmonics
@@ -450,8 +452,13 @@ __device__ void ray_render_composing (
 	float accumulated_color[CHANNELS] = { 0.0f };
 	float T = 1.0f;  // Start with full transmittance
 
+	// Bounds checking for the arrays
+    if (x < 0 || x >= W || y < 0 || y >= H || N_GAUSSIANS <= 0) {
+        return;
+    }
+
 	// Sort the Gaussians by depth
-	// quickSort(gaussians, depths, 0, N_GAUSSIANS - 1);
+    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
 
 	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
     for (int i = 0; i < N_GAUSSIANS; i++) {
