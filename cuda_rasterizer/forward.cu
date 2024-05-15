@@ -14,6 +14,8 @@
 #include "auxiliary.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <thrust/sort.h>
+#include <thrust/execution_policy.h>
 namespace cg = cooperative_groups;
 
 // Forward method for converting the input spherical harmonics
@@ -438,51 +440,59 @@ __device__ void ray_render_composing (
     const int H, // height of image
     const int W, // width of image
     // Array of 2D gaussians
-    const int N_GAUSSIANS,   	// the number of Gaussians
-    int *gaussians,          	// the index array of Gaussians; should be sorted by depth
+    const int N_GAUSSIANS,   	// number of Gaussians
+    int *gaussians,          	// index array of Gaussians; should be sorted by depth
     float *depths,            	// depths to sort the Gaussians
-    float2 *mean2D,          	// the mean which is where it's located in 2D space
-    const float *bg_color,            // color of background
-    const float* colors_precomp,// the computed color 
-    float4* conic_opacity,   	// the opacity
+    float2 *mean2D,          	// mean which is where it's located in 2D space
+    const float *bg_color,      // color of background
+    const float* colors_precomp,// computed color 
+    float4* conic_opacity,   	// opacity
     float *out_color            // output color
 ) {
-
 	float accumulated_color[CHANNELS] = { 0.0f };
-    float accumulated_alpha = 0.0f;
+	float T = 1.0f;  // Start with full transmittance
+
+	// Bounds checking for the arrays
+    if (x < 0 || x >= W || y < 0 || y >= H || N_GAUSSIANS <= 0) {
+        return;
+    }
 
 	// Sort the Gaussians by depth
-	// quickSort(gaussians, depths, 0, N_GAUSSIANS - 1);
+    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
 
+	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
     for (int i = 0; i < N_GAUSSIANS; i++) {
         int index = gaussians[i];
         float4 con_o = conic_opacity[index];
         float2 gaussian_mean = mean2D[index];
 
-        // Compute power using conic matrix (cf. "Surface Splatting" by Zwicker et al., 2001)
+        // Compute power using conic matrix
         float2 d = {x - gaussian_mean.x, y - gaussian_mean.y};
         float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
         if (power > 0.0f)
             continue;
 
-        // Compute alpha using the exponential of power and the Gaussian opacity
+        // Compute alpha
         float alpha = min(exp(power) * con_o.w, 0.99f);
         if (alpha < 1.0f / 255.0f)
 			continue;	// Skip if alpha is too small
-		if (1 - alpha < 0.0001f) {
-			break; 		// Break if alpha value saturates
-		}
 
+		// Update transmittance
+        float test_T = T * (1 - alpha);
+        if (test_T < 0.0001f)
+            break;  	// Stop if transmittance is negligible
+
+		// Accumulate color
 		for (int ch = 0; ch < CHANNELS; ch++) {
-			accumulated_color[ch] = colors_precomp[index * CHANNELS + ch] * alpha + accumulated_color[ch] * (1.0f - alpha);
+			accumulated_color[ch] += colors_precomp[index * CHANNELS + ch] * alpha * T;
 		}
 
-        accumulated_alpha += alpha * (1.0f - accumulated_alpha);
+        T = test_T;  	// Update the transmittance
     }
 
     int pix_id = y * W + x;
     for (int ch = 0; ch < CHANNELS; ch++) {
-		out_color[ch * H * W + pix_id] = accumulated_color[ch];
+		out_color[ch * H * W + pix_id] = accumulated_color[ch] + bg_color[ch] * T;
     }
 }
 
