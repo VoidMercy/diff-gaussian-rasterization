@@ -564,8 +564,6 @@ __global__ void ray_render_cuda(
 	intersection_t_far = -FLT_MAX;
 	stack[stack_pointer++] = { .idx=0, .t_near=0.0, .t_far=0.0 };
 
-	__syncthreads();
-
 	while (stack_pointer > 0) {
 		if (stack_pointer >= BVH_STACK_SIZE) {
 			printf("Stack overflow, should not happen\n");

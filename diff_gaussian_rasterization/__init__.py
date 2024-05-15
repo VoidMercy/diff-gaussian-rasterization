@@ -17,7 +17,7 @@ from torch.utils.cpp_extension import load
 import time
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-extra_opts = ["-I" + os.path.join(base_dir, "third_party/glm/"), "-I" + os.path.join(base_dir, "third_party/optix/")]
+extra_opts = ["-O3", "-I" + os.path.join(base_dir, "third_party/glm/"), "-I" + os.path.join(base_dir, "third_party/optix/")]
 _C = load(name="ray_rasterizer",
             sources=[
             os.path.join(base_dir,"cuda_rasterizer/rasterizer_impl.cu"),
