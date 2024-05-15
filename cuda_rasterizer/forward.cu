@@ -17,6 +17,11 @@
 #include <thrust/sort.h>
 #include <thrust/execution_policy.h>
 
+// #include <optix.h>
+// #include <optix_function_table_definition.h>
+// // #include <optix_stack_size.h>
+// #include <optix_stubs.h>
+
 namespace cg = cooperative_groups;
 
 // Forward method for converting the input spherical harmonics
@@ -446,10 +451,10 @@ __device__ void ray_render_composing (
 	float T = 1.0f;  // Start with full transmittance
 
 	// Sort the Gaussians by depth
-	if (N_GAUSSIANS > 1) {
-	    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
-	}
+	__syncthreads();
+    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
 
+	__syncthreads();
 	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
     for (int i = 0; i < N_GAUSSIANS; i++) {
         int index = gaussians[i];
@@ -480,6 +485,7 @@ __device__ void ray_render_composing (
         T = test_T;  	// Update the transmittance
     }
 
+	__syncthreads();
     int pix_id = y * W + x;
     for (int ch = 0; ch < CHANNELS; ch++) {
 		out_color[ch * H * W + pix_id] = accumulated_color[ch] + bg_color[ch] * T;
@@ -512,12 +518,12 @@ __global__ void ray_render_cuda(
 	// Output
 	float* out_color
 ) {
-	int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
-	if (pixel_id >= W * H) { // Outside number of pixels
-		return;
-	}
-	int pixel_x_coord = pixel_id % W;
-	int pixel_y_coord = pixel_id / W;
+	int pixel_x_coord = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixel_y_coord = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (pixel_x_coord >= W || pixel_y_coord >= H) {
+    	return;
+    }
 
 	// Compute camera frustrum and pixel coordinates in view space
 	float top = tanfovy * 1.0;
@@ -540,6 +546,7 @@ __global__ void ray_render_cuda(
 	// Gaussians
 	const int MAX_GAUSSIANS = 1024;
 	int gaussians[MAX_GAUSSIANS];
+	float gaussian_depths[MAX_GAUSSIANS];
 	int gaussian_idx = 0;
 
 	// Data structures for storing intersections
@@ -556,6 +563,8 @@ __global__ void ray_render_cuda(
 	intersection_t_near = FLT_MAX;
 	intersection_t_far = -FLT_MAX;
 	stack[stack_pointer++] = { .idx=0, .t_near=0.0, .t_far=0.0 };
+
+	__syncthreads();
 
 	while (stack_pointer > 0) {
 		if (stack_pointer >= BVH_STACK_SIZE) {
@@ -574,6 +583,7 @@ __global__ void ray_render_cuda(
 		if (bvh_nodes[node_addr].object_idx != -1) { // Is a leaf node
 			// printf("Found leaf. Pixel %d %d. Node %d AABB is (%f, %f, %f) (%f, %f, %f), for object %d at times (%f, %f)\n", pixel_x_coord, pixel_y_coord, node_addr, bvh_aabbs[node_addr].x_min, bvh_aabbs[node_addr].y_min, bvh_aabbs[node_addr].z_min, bvh_aabbs[node_addr].x_max, bvh_aabbs[node_addr].y_max, bvh_aabbs[node_addr].z_max, bvh_nodes[node_addr].object_idx, node_t_near, node_t_far);
 			// if (depths[bvh_nodes[node_addr].object_idx] > znear && depths[bvh_nodes[node_addr].object_idx] < zfar) { // Frustrum culling
+			gaussian_depths[gaussian_idx] = depths[bvh_nodes[node_addr].object_idx];
 			gaussians[gaussian_idx++] = bvh_nodes[node_addr].object_idx;
 			if (gaussian_idx == MAX_GAUSSIANS) {
 				break;
@@ -621,7 +631,7 @@ __global__ void ray_render_cuda(
 		W,
 		gaussian_idx,
 		gaussians,
-		depths,
+		gaussian_depths,
 		means2D,
 		bg_color,
 		colors_precomp,
@@ -656,10 +666,13 @@ void FORWARD::ray_render(
 	// Output
 	float* out_color)
 {
+
+	// optixInit();
+
 	cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024);
 	printf("Ray render %d x %d for %d channels\n", W, H, NUM_CHANNELS);
-	int threads_per_block = 256;
-	int num_blocks = (W * H + threads_per_block - 1) / threads_per_block;
+	dim3 threads_per_block(4, 4);
+	dim3 num_blocks((W + threads_per_block.x - 1) / threads_per_block.x, (H + threads_per_block.y - 1) / threads_per_block.y);
 	ray_render_cuda<NUM_CHANNELS> <<<num_blocks, threads_per_block>>> (
 		P, W, H,
 		znear, zfar,
