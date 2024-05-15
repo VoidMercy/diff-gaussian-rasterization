@@ -16,6 +16,7 @@
 #include <cooperative_groups/reduce.h>
 #include <thrust/sort.h>
 #include <thrust/execution_policy.h>
+
 namespace cg = cooperative_groups;
 
 // Forward method for converting the input spherical harmonics
@@ -193,8 +194,10 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Perform near culling, quit if outside.
 	float3 p_view;
-	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
+	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)) {
+		depths[idx] = p_view.z;
 		return;
+	}
 
 	// Transform point by projecting
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
@@ -398,7 +401,6 @@ __device__ struct HitInfo ray_bbox_intersect(
     glm::vec3 bbox_max(bvh_aabbs[bvh_idx].x_max, bvh_aabbs[bvh_idx].y_max, bvh_aabbs[bvh_idx].z_max);
 
 	struct HitInfo h;
-	h.hit = false;
 	h.t_near = FLT_MAX;
 	h.obj_idx = bvh_idx;
 
@@ -413,16 +415,7 @@ __device__ struct HitInfo ray_bbox_intersect(
     h.t_near = t_near;
     h.t_far = t_far;
 
-    if (t_far < 0) {
-    	return h;
-    }
-    if (t_near > t_far) {
-    	return h;
-    }
-    if (t_far < bound_near || t_near > bound_far) {
-    	return h;
-    }
-    h.hit = true;
+    h.hit = !((t_far < 0) || (t_near > t_far) || (t_far < bound_near) || (t_near > bound_far));
     return h;
 }
 
@@ -452,13 +445,10 @@ __device__ void ray_render_composing (
 	float accumulated_color[CHANNELS] = { 0.0f };
 	float T = 1.0f;  // Start with full transmittance
 
-	// Bounds checking for the arrays
-    if (x < 0 || x >= W || y < 0 || y >= H || N_GAUSSIANS <= 0) {
-        return;
-    }
-
 	// Sort the Gaussians by depth
-    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
+	if (N_GAUSSIANS > 1) {
+	    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
+	}
 
 	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
     for (int i = 0; i < N_GAUSSIANS; i++) {
@@ -547,14 +537,13 @@ __global__ void ray_render_cuda(
 	// printf("Camera position %f %f %f\n", ray_pos.x, ray_pos.y, ray_pos.z);
 	// printf("Pixel coord %f %f %f\n", pixel_w_vec.x, pixel_w_vec.y, pixel_w_vec.z);
 
-	const int BVH_STACK_SIZE = 1024;
-	const int MAX_GAUSSIANS = 1024;
-
 	// Gaussians
+	const int MAX_GAUSSIANS = 1024;
 	int gaussians[MAX_GAUSSIANS];
 	int gaussian_idx = 0;
 
 	// Data structures for storing intersections
+	const int BVH_STACK_SIZE = 1024;
 	struct stack_entry stack[BVH_STACK_SIZE];
 	int stack_pointer = 0;
 	int intersection_idx;
@@ -567,9 +556,11 @@ __global__ void ray_render_cuda(
 	intersection_t_near = FLT_MAX;
 	intersection_t_far = -FLT_MAX;
 	stack[stack_pointer++] = { .idx=0, .t_near=0.0, .t_far=0.0 };
+
 	while (stack_pointer > 0) {
 		if (stack_pointer >= BVH_STACK_SIZE) {
-			printf("WTF STACK OVERFLOW\n");
+			printf("Stack overflow, should not happen\n");
+			break;
 		}
 		struct stack_entry cur = stack[--stack_pointer];
 		int node_addr = cur.idx;
@@ -582,15 +573,17 @@ __global__ void ray_render_cuda(
 
 		if (bvh_nodes[node_addr].object_idx != -1) { // Is a leaf node
 			// printf("Found leaf. Pixel %d %d. Node %d AABB is (%f, %f, %f) (%f, %f, %f), for object %d at times (%f, %f)\n", pixel_x_coord, pixel_y_coord, node_addr, bvh_aabbs[node_addr].x_min, bvh_aabbs[node_addr].y_min, bvh_aabbs[node_addr].z_min, bvh_aabbs[node_addr].x_max, bvh_aabbs[node_addr].y_max, bvh_aabbs[node_addr].z_max, bvh_nodes[node_addr].object_idx, node_t_near, node_t_far);
+			// if (depths[bvh_nodes[node_addr].object_idx] > znear && depths[bvh_nodes[node_addr].object_idx] < zfar) { // Frustrum culling
 			gaussians[gaussian_idx++] = bvh_nodes[node_addr].object_idx;
 			if (gaussian_idx == MAX_GAUSSIANS) {
 				break;
 			}
-			if (node_t_near < intersection_t_near) {
-				intersection_t_near = node_t_near;
-				intersection_t_far = node_t_far;
-				intersection_idx = bvh_nodes[node_addr].object_idx;
-			}
+			// }
+			// if (node_t_near < intersection_t_near) {
+			// 	intersection_t_near = node_t_near;
+			// 	intersection_t_far = node_t_far;
+			// 	intersection_idx = bvh_nodes[node_addr].object_idx;
+			// }
 		} else {
 			int left_idx = bvh_nodes[node_addr].left_idx;
 			int right_idx = bvh_nodes[node_addr].right_idx;
@@ -611,6 +604,7 @@ __global__ void ray_render_cuda(
 			// if (hit_first) {
 			// 	stack[stack_pointer++] = { .idx=first_idx, .t_near=first_t_near, .t_far=first_t_far };
 			// }
+
 			if (h1.hit) {
 				stack[stack_pointer++] = { .idx=left_idx, .t_near=h1.t_near, .t_far=h1.t_far };
 			}
@@ -620,23 +614,21 @@ __global__ void ray_render_cuda(
 		}
 	}
 
-	if (gaussian_idx > 0) {
-		ray_render_composing<CHANNELS>(
-			pixel_x_coord,
-			pixel_y_coord,
-			H,
-			W,
-			gaussian_idx,
-			gaussians,
-			depths,
-			means2D,
-			bg_color,
-			colors_precomp,
-			conic_opacity,
-			out_color
-		);
-		printf("Total intersections for pixel (%d, %d): %d. Color: (%f, %f, %f)\n", pixel_x_coord, pixel_y_coord, gaussian_idx, out_color[pixel_id], out_color[H * W + pixel_id], out_color[2 * H * W + pixel_id]);
-	}
+	ray_render_composing<CHANNELS>(
+		pixel_x_coord,
+		pixel_y_coord,
+		H,
+		W,
+		gaussian_idx,
+		gaussians,
+		depths,
+		means2D,
+		bg_color,
+		colors_precomp,
+		conic_opacity,
+		out_color
+	);
+	// printf("Total intersections for pixel (%d, %d): %d. Color: (%f, %f, %f)\n", pixel_x_coord, pixel_y_coord, gaussian_idx, out_color[pixel_id], out_color[H * W + pixel_id], out_color[2 * H * W + pixel_id]);
 }
 
 void FORWARD::ray_render(
@@ -664,6 +656,7 @@ void FORWARD::ray_render(
 	// Output
 	float* out_color)
 {
+	cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024);
 	printf("Ray render %d x %d for %d channels\n", W, H, NUM_CHANNELS);
 	int threads_per_block = 256;
 	int num_blocks = (W * H + threads_per_block - 1) / threads_per_block;

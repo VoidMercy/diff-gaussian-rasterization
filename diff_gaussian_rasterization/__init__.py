@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch
 import os
 from torch.utils.cpp_extension import load
+import time
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 extra_opts = ["-I" + os.path.join(base_dir, "third_party/glm/")]
@@ -163,6 +164,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         # python_rasterize(bvh_nodes, bvh_aabbs, raster_settings.viewmatrix, raster_settings.projmatrix, raster_settings.tanfovx, raster_settings.tanfovy, raster_settings.campos, raster_settings.znear, raster_settings.zfar, means3D, cov3Ds_precomp, scales, rotations, raster_settings.image_width, raster_settings.image_height)
 
         # Invoke C++/CUDA rasterizer
+        start_time = time.time()
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
@@ -173,6 +175,9 @@ class _RasterizeGaussians(torch.autograd.Function):
                 raise ex
         else:
             num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer = _C.rasterize_gaussians(*args)
+        print(color)
+        end_time = time.time()
+        print(f"Rasterize took {end_time - start_time} seconds")
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings

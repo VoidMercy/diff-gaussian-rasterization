@@ -282,7 +282,7 @@ int CudaRasterizer::Rasterizer::forward(
 
 	CHECK_CUDA(FORWARD::ray_render(
 		P, width, height,
-		// Information needed by ray tracer
+		// information needed by ray tracer
 		znear, zfar,
 		viewmatrix,
 		viewmatrix_inv,
@@ -293,17 +293,17 @@ int CudaRasterizer::Rasterizer::forward(
 		BVH_N,
 		(const struct bvh_node *)bvh_nodes,
 		(const struct bvh_aabb *)bvh_aabbs,
-		// Information used to compute 2D projection color
+		// information used to compute 2d projection color
 		geomState.means2D,
 		background,
 		geomState.depths,
 		(colors_precomp != nullptr ? colors_precomp : geomState.rgb),
 		geomState.conic_opacity,
-		// Outputs
+		// outputs
 		out_color
 	), debug)
 
-	int num_rendered = 0; // FIXME: what is this for?
+	int num_rendered = 0; // fixme: what is this for?
 
 	// // Compute prefix sum over full list of touched tile counts by Gaussians
 	// // E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
@@ -364,6 +364,13 @@ int CudaRasterizer::Rasterizer::forward(
 	// 	imgState.n_contrib,
 	// 	background,
 	// 	out_color), debug)
+
+	cudaError_t cuda_err;
+	cuda_err = cudaDeviceSynchronize(); // Wait for kernel to finish and check for errors
+	if (cuda_err != cudaSuccess) {
+	    printf("cudaDeviceSynchronize failed: %s\n", cudaGetErrorString(cuda_err));
+	    // Handle the error appropriately, maybe exit the program or return an error code
+	}
 
 	return num_rendered;
 }
