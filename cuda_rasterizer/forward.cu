@@ -493,6 +493,87 @@ __device__ void ray_render_composing (
 }
 
 template <uint32_t CHANNELS>
+__device__ void ray_render_composing_3D(
+    int x, int y,  			   // Pixel coordinates
+    const int H, const int W,  // Image dimensions
+    float3 ray_origin,         // Starting position of the ray
+    float3 ray_direction,      // Normalized direction vector of the ray
+    float2 *t_bounds,          // Array of near and far intersection points for each Gaussian
+    const int N_GAUSSIANS,     // Number of Gaussians
+    int *gaussians,            // Index array of Gaussians, to be sorted by t_near
+    float3 *mean3D,            // Mean positions in 3D space for each Gaussian
+    float *cov3D,              // Covariance (simplified as isotropic for this example)
+    const float *bg_color,     // Background color, assumed to be CHANNELS in size
+    const float* colors_precomp, // Precomputed colors for each Gaussian, CHANNELS per Gaussian
+    float4* conic_opacity,     // Opacity and additional parameters packed in float4
+    float *out_color           // Output color buffer for the entire image
+) {
+    // Temporary arrays for efficient sorting
+    float *t_near = new float[N_GAUSSIANS];
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+        t_near[i] = t_bounds[gaussians[i]].x;
+    }
+
+    // Sort Gaussians by t_near
+	__syncthreads();
+    thrust::device_ptr<int> dev_gaussians(gaussians);
+    thrust::device_ptr<float> dev_t_near(t_near);
+    thrust::sort_by_key(thrust::device, dev_t_near, dev_t_near + N_GAUSSIANS, dev_gaussians);
+
+    // Free temporary array
+    delete[] t_near;
+
+	float accumulated_color[CHANNELS] = {0.0f};
+    float T = 1.0f;  // Full transmittance initially
+
+    // Iterate over each Gaussian affecting the ray
+	__syncthreads();
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+        int idx = gaussians[i];
+        float3 gaussian_mean = mean3D[idx];
+        float covariance = cov3D[idx];  // Assuming isotropic for simplification
+        float4 color_and_opacity = conic_opacity[idx];
+        float alpha = color_and_opacity.w;
+
+        // Ray-Gaussian intersection bounds
+        float t_start = t_bounds[idx].x;
+        float t_end = t_bounds[idx].y;
+        if (t_start > t_end) continue;
+
+		// Discretization steps
+        float dt = (t_end - t_start) / 10.0f;
+
+        // March along the ray within the bounds of the current Gaussian
+        for (float t = t_start; t <= t_end; t += dt) {
+            float3 sample_point = ray_origin + t * ray_direction;
+            float distance2 = length(sample_point - gaussian_mean);
+            float density = expf(-0.5f * distance2 / covariance);
+
+            float sample_alpha = density * alpha * dt;
+            if (sample_alpha < 0.0001f) continue; 		// Skip negligible contributions
+
+            sample_alpha = min(sample_alpha, 1.0f - T); // Clamp to remaining transmittance
+
+            // Blend colors
+            for (int ch = 0; ch < CHANNELS; ch++) {
+                accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * sample_alpha;
+            }
+
+            T *= (1.0f - sample_alpha); // Update remaining transmittance
+            if (T < 0.01f) break; 		// Early termination if opaque
+        }
+
+        if (T < 0.01f) break; // Early termination if opaque
+    }
+
+	__syncthreads();
+    int pix_id = y * W + x;
+    for (int ch = 0; ch < CHANNELS; ch++) {
+        out_color[pix_id * CHANNELS + ch] = accumulated_color[ch] + bg_color[ch] * T;
+    }
+}
+
+template <uint32_t CHANNELS>
 __global__ void ray_render_cuda(
 	const int P,
 	const int W,
