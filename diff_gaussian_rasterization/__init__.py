@@ -41,8 +41,7 @@ def rasterize_gaussians(
     rotations,
     cov3Ds_precomp,
     raster_settings,
-    bvh_nodes,
-    bvh_aabbs
+    aabbs
 ):
     return _RasterizeGaussians.apply(
         means3D,
@@ -54,8 +53,7 @@ def rasterize_gaussians(
         rotations,
         cov3Ds_precomp,
         raster_settings,
-        bvh_nodes,
-        bvh_aabbs
+        aabbs
     )
 
 def compute_ray_bbox_intersection(ray_pos, ray_dir, bbox_min, bbox_max):
@@ -75,47 +73,6 @@ def compute_ray_bbox_intersection(ray_pos, ray_dir, bbox_min, bbox_max):
 
     return True, t_near, t_far
 
-def find_closest(bvh_nodes, bvh_aabbs, ray_pos, ray_dir, node_addr, means3D):
-    if bvh_nodes[node_addr][3] != -1:
-        # Is leaf
-        hit, t_near, t_far = compute_ray_bbox_intersection(ray_pos, ray_dir, bvh_aabbs[node_addr, :, 0], bvh_aabbs[node_addr, :, 1])
-        assert hit
-        print(f"Hit leaf for t=({t_near}, {t_far}), node {node_addr} and object {bvh_nodes[node_addr][3]}")
-    else:
-        h1_hit, h1_t_near, h1_t_far = compute_ray_bbox_intersection(ray_pos, ray_dir,  bvh_aabbs[bvh_nodes[node_addr, 1], :, 0], bvh_aabbs[bvh_nodes[node_addr, 1], :, 1])
-        h2_hit, h2_t_near, h2_t_far = compute_ray_bbox_intersection(ray_pos, ray_dir,  bvh_aabbs[bvh_nodes[node_addr, 2], :, 0], bvh_aabbs[bvh_nodes[node_addr, 2], :, 1])
-        if h1_hit:
-            find_closest(bvh_nodes, bvh_aabbs, ray_pos, ray_dir, bvh_nodes[node_addr, 1], means3D)
-        if h2_hit:
-            find_closest(bvh_nodes, bvh_aabbs, ray_pos, ray_dir, bvh_nodes[node_addr, 2], means3D)
-
-def python_rasterize(bvh_nodes, bvh_aabbs, viewmatrix, projmatrix, tanfovx, tanfovy, campos, znear, zfar, means3D, cov3Ds_precomp, scales, rotations, image_width, image_height):
-    viewmatrix = viewmatrix.T
-    projmatrix = projmatrix.T
-
-    top = tanfovy * 1.0
-    bottom = -top
-    right = tanfovx * 1.0
-    left = -right
-
-    print(image_width, image_height)
-
-    for p_x in range(image_width):
-        for p_y in range(image_height):
-
-            pixel_view = torch.tensor([right * 2.0 * (p_x / image_width) - right, top * 2.0 * (p_y / image_height) - top, -1.0, 1.0]).cuda()
-            pixel_world = viewmatrix.inverse() @pixel_view 
-            pixel_world = pixel_world[:3]
-
-            ray_pos = campos
-            ray_dir = pixel_world - ray_pos
-            ray_dir = ray_dir / torch.norm(ray_dir)
-            # print("Ray position", ray_pos)
-            # print("Ray direction", ray_dir)
-            # print("Pixel coord", pixel_world)
-
-    find_closest(bvh_nodes, bvh_aabbs, ray_pos, ray_dir, 0, means3D)
-
 class _RasterizeGaussians(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -129,8 +86,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         rotations,
         cov3Ds_precomp,
         raster_settings,
-        bvh_nodes,
-        bvh_aabbs
+        aabbs
     ):
 
         # Restructure arguments the way that the C++ lib expects them
@@ -156,12 +112,9 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.sh_degree,
             raster_settings.campos,
             raster_settings.prefiltered,
-            bvh_nodes,
-            bvh_aabbs,
+            aabbs,
             raster_settings.debug
         )
-
-        # python_rasterize(bvh_nodes, bvh_aabbs, raster_settings.viewmatrix, raster_settings.projmatrix, raster_settings.tanfovx, raster_settings.tanfovy, raster_settings.campos, raster_settings.znear, raster_settings.zfar, means3D, cov3Ds_precomp, scales, rotations, raster_settings.image_width, raster_settings.image_height)
 
         # Invoke C++/CUDA rasterizer
         start_time = time.time()
@@ -275,7 +228,7 @@ class GaussianRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, means3D, means2D, opacities, bvh_nodes, bvh_aabbs, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+    def forward(self, means3D, means2D, opacities, aabbs,shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
         
         raster_settings = self.raster_settings
 
@@ -308,7 +261,6 @@ class GaussianRasterizer(nn.Module):
             rotations,
             cov3D_precomp,
             raster_settings, 
-            bvh_nodes,
-            bvh_aabbs
+            aabbs
         )
 

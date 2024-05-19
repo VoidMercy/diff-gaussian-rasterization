@@ -28,10 +28,10 @@ struct bvh_node {
 
 struct bvh_aabb {
     float x_min;
-    float x_max;
     float y_min;
-    float y_max;
     float z_min;
+    float x_max;
+    float y_max;
     float z_max;
 };
 

@@ -56,8 +56,7 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& campos,
 	const bool prefiltered,
 	// Ray tracing strucrures
-	const torch::Tensor& bvh_nodes,
-	const torch::Tensor& bvh_aabbs,
+	const torch::Tensor& aabbs,
 	const bool debug)
 {
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
@@ -67,7 +66,6 @@ RasterizeGaussiansCUDA(
   const int P = means3D.size(0);
   const int H = image_height;
   const int W = image_width;
-  const int BVH_N = bvh_nodes.size(0);
 
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
@@ -118,9 +116,7 @@ RasterizeGaussiansCUDA(
 		tan_fovy,
 		prefiltered,
 		// Information for ray tracer
-		BVH_N,
-		bvh_nodes.contiguous().data<int>(),
-		bvh_aabbs.contiguous().data<float>(),
+		aabbs.contiguous().data<float>(),
 		out_color.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
 		debug);
