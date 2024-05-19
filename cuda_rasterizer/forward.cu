@@ -749,7 +749,87 @@ static void context_log_cb( unsigned int level, const char* tag, const char* mes
     std::cerr << "[" << std::setw( 2 ) << level << "][" << std::setw( 12 ) << tag << "]: " << message << "\n";
 }
 
-void build_optix_bvh(const int W, const int H, const int P, float *vertices, float *radii, float *d_aabbBuffer, float tanfovx, float tanfovy, float *viewmatrix_inv, float *cam_pos, float *depths) {
+template <uint32_t CHANNELS>
+__global__ void collect_and_sort(	int W, int H,
+									int *d_gaussians,
+									float *d_depths,
+									int *n_gaussians,
+									float2 *means2D,
+									const float *bg_color,
+				    				const float* colors_precomp,
+									float4 *conic_opacity,
+									float *out_color
+								) {
+	int gaussians[1024];
+	float depths[1024];
+
+	int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
+	if (pixel_id >= W * H) {
+		return;
+	}
+	int x = pixel_id % W;
+	int y = pixel_id / W;
+
+    int N_GAUSSIANS = n_gaussians[pixel_id];
+
+    // Collect
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+    	gaussians[i] = d_gaussians[i * W * H + pixel_id];
+    	depths[i] = d_depths[d_gaussians[i * W * H + pixel_id]];
+    }
+
+    // Sort
+	// __syncthreads();
+    // thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
+
+    // Compose
+	__syncthreads();
+	float accumulated_color[CHANNELS] = { 0.0f };
+	float T = 1.0f;  // Start with full transmittance
+	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+        int index = gaussians[i];
+        float4 con_o = conic_opacity[index];
+        float2 gaussian_mean = means2D[index];
+
+        // Compute power using conic matrix
+        float2 d = {x - gaussian_mean.x, y - gaussian_mean.y};
+        float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+        if (power > 0.0f)
+            continue;
+
+        // Compute alpha
+        float alpha = min(exp(power) * con_o.w, 0.99f);
+        if (alpha < 1.0f / 255.0f)
+			continue;	// Skip if alpha is too small
+
+		// Update transmittance
+        float test_T = T * (1 - alpha);
+        if (test_T < 0.0001f)
+            break;  	// Stop if transmittance is negligible
+
+		// Accumulate color
+		for (int ch = 0; ch < CHANNELS; ch++) {
+			accumulated_color[ch] += colors_precomp[index * CHANNELS + ch] * alpha * T;
+		}
+
+        T = test_T;  	// Update the transmittance
+    }
+
+	__syncthreads();
+    int pix_id = y * W + x;
+    for (int ch = 0; ch < CHANNELS; ch++) {
+		out_color[ch * H * W + pix_id] = accumulated_color[ch] + bg_color[ch] * T;
+    }
+}
+
+template <uint32_t CHANNELS>
+void build_optix_bvh(const int W, const int H, const int P, float *vertices, float *radii, float *d_aabbBuffer, float tanfovx, float tanfovy, float *viewmatrix_inv, float *cam_pos, float *depths,
+									float2 *means2D,
+									const float *bg_color,
+									const float* colors_precomp,
+									float4 *conic_opacity,
+									float *out_color) {
 	auto start = std::chrono::high_resolution_clock::now();
 	printf("Building Optix BVH\n");
 
@@ -1175,14 +1255,21 @@ void build_optix_bvh(const int W, const int H, const int P, float *vertices, flo
 			max_value = n_gaussians[i];
 		}
 		count += n_gaussians[i];
-		if (i == 0) {
-			for (int j = 0; j < n_gaussians[i]; j++) {
-				printf("Lol %d\n", gaussians[j * W * H + i]);
-			}
-		}
 	}
+
+	// Now we sort and alpha-compose
 	printf("Max: %d\n", max_value);
 	printf("Total ray intersections: %d\n", count);
+
+	start = std::chrono::high_resolution_clock::now();
+	int threads_per_block = 256;
+	int blocks = (W * H + threads_per_block - 1) / threads_per_block;
+	collect_and_sort<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (int *)p.gaussians, (float *)depths, (int *)p.n_gaussians, means2D, bg_color, colors_precomp, conic_opacity, out_color);
+	cudaDeviceSynchronize();
+	end = std::chrono::high_resolution_clock::now();
+	duration = end - start;
+	printf("Sort and compose took %lf seconds\n", duration.count());
+
 }
 
 void FORWARD::ray_render(
@@ -1215,7 +1302,7 @@ void FORWARD::ray_render(
 {
 
 	cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024);
-	build_optix_bvh(W, H, P, means3D, radius, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths);
+	build_optix_bvh<NUM_CHANNELS> (W, H, P, means3D, radius, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths, means2D, bg_color, colors_precomp, conic_opacity, out_color);
 	return;
 
 	auto start = std::chrono::high_resolution_clock::now();
