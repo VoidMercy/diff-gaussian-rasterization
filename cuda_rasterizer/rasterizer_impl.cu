@@ -222,7 +222,8 @@ int CudaRasterizer::Rasterizer::forward(
 	const int BVH_N,
 	const int* bvh_nodes,
 	const float* bvh_aabbs,
-
+	float* radius,
+	float* aabbs,
 	float* out_color,
 	int* radii,
 	bool debug)
@@ -293,7 +294,10 @@ int CudaRasterizer::Rasterizer::forward(
 		BVH_N,
 		(const struct bvh_node *)bvh_nodes,
 		(const struct bvh_aabb *)bvh_aabbs,
+		(float *)radius,
+		(float *)aabbs,
 		// information used to compute 2d projection color
+		(float *)means3D,
 		geomState.means2D,
 		background,
 		geomState.depths,

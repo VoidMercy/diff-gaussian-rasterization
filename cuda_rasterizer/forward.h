@@ -78,7 +78,10 @@ namespace FORWARD
 		const int BVH_N,
 		const struct bvh_node* bvh_nodes,
 		const struct bvh_aabb* bvh_aabbs,
+		float *radius,
+		float *aabbs,
 		// Information used to compute 2D projection color
+		float* means3D,
 		float2* means2D,
 		const float* bg_color,
 		float* depths,

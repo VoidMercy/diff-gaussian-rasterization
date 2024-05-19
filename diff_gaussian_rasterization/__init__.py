@@ -42,7 +42,9 @@ def rasterize_gaussians(
     cov3Ds_precomp,
     raster_settings,
     bvh_nodes,
-    bvh_aabbs
+    bvh_aabbs,
+    radius,
+    aabbs
 ):
     return _RasterizeGaussians.apply(
         means3D,
@@ -55,7 +57,9 @@ def rasterize_gaussians(
         cov3Ds_precomp,
         raster_settings,
         bvh_nodes,
-        bvh_aabbs
+        bvh_aabbs,
+        radius,
+        aabbs
     )
 
 def compute_ray_bbox_intersection(ray_pos, ray_dir, bbox_min, bbox_max):
@@ -130,7 +134,9 @@ class _RasterizeGaussians(torch.autograd.Function):
         cov3Ds_precomp,
         raster_settings,
         bvh_nodes,
-        bvh_aabbs
+        bvh_aabbs,
+        radius,
+        aabbs
     ):
 
         # Restructure arguments the way that the C++ lib expects them
@@ -158,6 +164,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.prefiltered,
             bvh_nodes,
             bvh_aabbs,
+            radius,
+            aabbs,
             raster_settings.debug
         )
 
@@ -275,7 +283,7 @@ class GaussianRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, means3D, means2D, opacities, bvh_nodes, bvh_aabbs, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+    def forward(self, means3D, means2D, opacities, bvh_nodes, bvh_aabbs, radius, aabbs,shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
         
         raster_settings = self.raster_settings
 
@@ -309,6 +317,8 @@ class GaussianRasterizer(nn.Module):
             cov3D_precomp,
             raster_settings, 
             bvh_nodes,
-            bvh_aabbs
+            bvh_aabbs,
+            radius,
+            aabbs
         )
 

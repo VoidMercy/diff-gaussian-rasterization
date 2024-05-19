@@ -54,6 +54,8 @@ namespace CudaRasterizer
 			const int BVH_N,
 			const int* bvh_nodes,
 			const float* bvh_aabbs,
+			float* radius,
+			float* aabbs,
 			float* out_color,
 			int* radii = nullptr,
 			bool debug = false);
