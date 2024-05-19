@@ -15,6 +15,7 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 #include <thrust/sort.h>
+#include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
 
 // #include <optix.h>
@@ -544,14 +545,22 @@ __device__ void ray_render_composing_3D(
         float dt = (t_end - t_start) / 10.0f;
 
         // March along the ray within the bounds of the current Gaussian
-        for (float t = t_start; t <= t_end; t += dt) {
-            float3 sample_point = ray_origin + t * ray_direction;
-            float distance2 = length(sample_point - gaussian_mean);
-            float density = expf(-0.5f * distance2 / covariance);
+        for (float t_curr = t_start; t_curr <= t_end; t_curr += dt) {
+			float3 sample_point;
+            sample_point.x = ray_origin.x + t_curr * ray_direction.x;
+            sample_point.y = ray_origin.y + t_curr * ray_direction.y;
+            sample_point.z = ray_origin.z + t_curr * ray_direction.z;
+
+			float3 diff;
+            diff.x = sample_point.x - gaussian_mean.x;
+            diff.y = sample_point.y - gaussian_mean.y;
+            diff.z = sample_point.z - gaussian_mean.z;
+
+			float distance2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+			float density = expf(-0.5f * distance2 / covariance);
 
             float sample_alpha = density * alpha * dt;
             if (sample_alpha < 0.0001f) continue; 		// Skip negligible contributions
-
             sample_alpha = min(sample_alpha, 1.0f - T); // Clamp to remaining transmittance
 
             // Blend colors
