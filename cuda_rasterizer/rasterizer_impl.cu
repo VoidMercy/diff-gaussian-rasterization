@@ -219,10 +219,6 @@ int CudaRasterizer::Rasterizer::forward(
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
 	// Information for ray tracer
-	const int BVH_N,
-	const int* bvh_nodes,
-	const float* bvh_aabbs,
-	float* radius,
 	float* aabbs,
 	float* out_color,
 	int* radii,
@@ -291,10 +287,6 @@ int CudaRasterizer::Rasterizer::forward(
 		tan_fovx,
 		tan_fovy,
 		(glm::vec3*)cam_pos,
-		BVH_N,
-		(const struct bvh_node *)bvh_nodes,
-		(const struct bvh_aabb *)bvh_aabbs,
-		(float *)radius,
 		(float *)aabbs,
 		// information used to compute 2d projection color
 		(float *)means3D,

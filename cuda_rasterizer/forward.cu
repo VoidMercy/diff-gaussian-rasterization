@@ -408,265 +408,6 @@ renderCUDA(
 	}
 }
 
-struct HitInfo {
-	 bool hit;
-	 float t_near;
-	 float t_far;
-	 int obj_idx;
-};
-
-__device__ struct HitInfo ray_bbox_intersect(
-    glm::vec3 ray_pos,
-    glm::vec3 ray_dir_inv,
-	const struct bvh_aabb* bvh_aabbs,
-	int bvh_idx,
-    float bound_near,
-    float bound_far
-) {
-    glm::vec3 bbox_min(bvh_aabbs[bvh_idx].x_min, bvh_aabbs[bvh_idx].y_min, bvh_aabbs[bvh_idx].z_min);
-    glm::vec3 bbox_max(bvh_aabbs[bvh_idx].x_max, bvh_aabbs[bvh_idx].y_max, bvh_aabbs[bvh_idx].z_max);
-
-	struct HitInfo h;
-	h.t_near = FLT_MAX;
-	h.obj_idx = bvh_idx;
-
-    glm::vec3 t_min = (bbox_min - ray_pos) * ray_dir_inv;
-    glm::vec3 t_max = (bbox_max - ray_pos) * ray_dir_inv;
-
-    glm::vec3 t1 = glm::min(t_min, t_max);
-    glm::vec3 t2 = glm::max(t_min, t_max);
-
-    float t_near = fmaxf(fmaxf(t1.x, t1.y), t1.z);
-    float t_far = fminf(fminf(t2.x, t2.y), t2.z);
-    h.t_near = t_near;
-    h.t_far = t_far;
-
-    h.hit = !((t_far < 0) || (t_near > t_far) || (t_far < bound_near) || (t_near > bound_far));
-    return h;
-}
-
-struct stack_entry {
-	int idx;
-	float t_near;
-	float t_far;
-};
-
-template <uint32_t CHANNELS>
-__device__ void ray_render_composing (
-    // The coordinate of the current point being computed
-    int x,
-    int y,
-    const int H, // height of image
-    const int W, // width of image
-    // Array of 2D gaussians
-    const int N_GAUSSIANS,   	// number of Gaussians
-    int *gaussians,          	// index array of Gaussians; should be sorted by depth
-    float *depths,            	// depths to sort the Gaussians
-    float2 *mean2D,          	// mean which is where it's located in 2D space
-    const float *bg_color,      // color of background
-    const float* colors_precomp,// computed color 
-    float4* conic_opacity,   	// opacity
-    float *out_color            // output color
-) {
-	float accumulated_color[CHANNELS] = { 0.0f };
-	float T = 1.0f;  // Start with full transmittance
-
-	// Sort the Gaussians by depth
-	__syncthreads();
-    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
-
-	__syncthreads();
-	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
-    for (int i = 0; i < N_GAUSSIANS; i++) {
-        int index = gaussians[i];
-        float4 con_o = conic_opacity[index];
-        float2 gaussian_mean = mean2D[index];
-
-        // Compute power using conic matrix
-        float2 d = {x - gaussian_mean.x, y - gaussian_mean.y};
-        float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
-        if (power > 0.0f)
-            continue;
-
-        // Compute alpha
-        float alpha = min(exp(power) * con_o.w, 0.99f);
-        if (alpha < 1.0f / 255.0f)
-			continue;	// Skip if alpha is too small
-
-		// Update transmittance
-        float test_T = T * (1 - alpha);
-        if (test_T < 0.0001f)
-            break;  	// Stop if transmittance is negligible
-
-		// Accumulate color
-		for (int ch = 0; ch < CHANNELS; ch++) {
-			accumulated_color[ch] += colors_precomp[index * CHANNELS + ch] * alpha * T;
-		}
-
-        T = test_T;  	// Update the transmittance
-    }
-
-	__syncthreads();
-    int pix_id = y * W + x;
-    for (int ch = 0; ch < CHANNELS; ch++) {
-		out_color[ch * H * W + pix_id] = accumulated_color[ch] + bg_color[ch] * T;
-    }
-}
-
-template <uint32_t CHANNELS>
-__global__ void ray_render_cuda(
-	const int P,
-	const int W,
-	const int H,
-	// Information needed by ray tracer
-	const float znear,
-	const float zfar,
-	const float* viewmatrix,
-	const float* viewmatrix_inv,
-	const float* projmatrix,
-	const float tanfovx,
-	const float tanfovy,
-	const glm::vec3* cam_pos,
-	const int BVH_N,
-	const struct bvh_node* bvh_nodes,
-	const struct bvh_aabb* bvh_aabbs,
-	// Information used to compute 2D projection color
-	float2* means2D,
-	const float* bg_color,
-	float *depths,
-	const float* colors_precomp,
-	float4* conic_opacity,
-	// Output
-	float* out_color
-) {
-	int pixel_x_coord = blockIdx.x * blockDim.x + threadIdx.x;
-    int pixel_y_coord = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (pixel_x_coord >= W || pixel_y_coord >= H) {
-    	return;
-    }
-
-	// Compute camera frustrum and pixel coordinates in view space
-	float top = tanfovy * 1.0;
-	float right = tanfovx * 1.0;
-
-	float pixel_view_x = right * 2.0 * ((float)(pixel_x_coord + 0.5) / (float)W) - right;
-	float pixel_view_y = top * 2.0 * ((float)(pixel_y_coord + 0.5) / (float)H) - top;
-	float3 pixel_v = { pixel_view_x, pixel_view_y, 1.0 };
-	float3 pixel_w = transformPoint4x3(pixel_v, viewmatrix_inv);
-	glm::vec3 pixel_w_vec(pixel_w.x, pixel_w.y, pixel_w.z);
-
-	glm::vec3 ray_pos = *cam_pos;
-	glm::vec3 ray_dir = glm::normalize(pixel_w_vec - ray_pos);
-	glm::vec3 ray_dir_inv = glm::vec3(1.0f) / ray_dir;
-
-	if (pixel_x_coord == 0 && pixel_y_coord == 0) {
-		printf("Ray position: %f %f %f\n", ray_pos.x, ray_pos.y, ray_pos.z);
-		printf("Ray direction: %f %f %f\n", ray_dir.x, ray_dir.y, ray_dir.z);
-	}
-
-	// Cast a ray from cam_pos to pixel_w (in world space), and ray trace!
-	// printf("Camera position %f %f %f\n", ray_pos.x, ray_pos.y, ray_pos.z);
-	// printf("Pixel coord %f %f %f\n", pixel_w_vec.x, pixel_w_vec.y, pixel_w_vec.z);
-
-	// Gaussians
-	const int MAX_GAUSSIANS = 1024;
-	int gaussians[MAX_GAUSSIANS];
-	float gaussian_depths[MAX_GAUSSIANS];
-	int gaussian_idx = 0;
-
-	// Data structures for storing intersections
-	const int BVH_STACK_SIZE = 1024;
-	struct stack_entry stack[BVH_STACK_SIZE];
-	int stack_pointer = 0;
-	int intersection_idx;
-	float intersection_t_near;
-	float intersection_t_far;
-
-	float min_t_near = -FLT_MAX;
-
-	intersection_idx = -1;
-	intersection_t_near = FLT_MAX;
-	intersection_t_far = -FLT_MAX;
-	stack[stack_pointer++] = { .idx=0, .t_near=0.0, .t_far=0.0 };
-
-	__syncthreads();
-
-	while (stack_pointer > 0) {
-		if (stack_pointer >= BVH_STACK_SIZE) {
-			printf("Stack overflow, should not happen\n");
-			break;
-		}
-		struct stack_entry cur = stack[--stack_pointer];
-		int node_addr = cur.idx;
-		float node_t_near = cur.t_near;
-		float node_t_far = cur.t_far;
-
-		// if (node_t_near >= intersection_t_near) { // Found a closer intersection already, so skip this node
-		// 	continue;
-		// }
-
-		if (bvh_nodes[node_addr].object_idx != -1) { // Is a leaf node
-			// printf("Found leaf. Pixel %d %d. Node %d AABB is (%f, %f, %f) (%f, %f, %f), for object %d at times (%f, %f)\n", pixel_x_coord, pixel_y_coord, node_addr, bvh_aabbs[node_addr].x_min, bvh_aabbs[node_addr].y_min, bvh_aabbs[node_addr].z_min, bvh_aabbs[node_addr].x_max, bvh_aabbs[node_addr].y_max, bvh_aabbs[node_addr].z_max, bvh_nodes[node_addr].object_idx, node_t_near, node_t_far);
-			// if (depths[bvh_nodes[node_addr].object_idx] > znear && depths[bvh_nodes[node_addr].object_idx] < zfar) { // Frustrum culling
-			gaussian_depths[gaussian_idx] = depths[bvh_nodes[node_addr].object_idx];
-			gaussians[gaussian_idx++] = bvh_nodes[node_addr].object_idx;
-			if (gaussian_idx == MAX_GAUSSIANS) {
-				break;
-			}
-			// }
-			// if (node_t_near < intersection_t_near) {
-			// 	intersection_t_near = node_t_near;
-			// 	intersection_t_far = node_t_far;
-			// 	intersection_idx = bvh_nodes[node_addr].object_idx;
-			// }
-		} else {
-			int left_idx = bvh_nodes[node_addr].left_idx;
-			int right_idx = bvh_nodes[node_addr].right_idx;
-			HitInfo h1 = ray_bbox_intersect(ray_pos, ray_dir_inv, bvh_aabbs, left_idx, 0.0, FLT_MAX);
-			HitInfo h2 = ray_bbox_intersect(ray_pos, ray_dir_inv, bvh_aabbs, right_idx, 0.0, FLT_MAX);
-			// int first_idx = (h1.t_near < h2.t_near) ? left_idx : right_idx;
-			// int second_idx = (h1.t_near < h2.t_near) ? right_idx : left_idx;
-			// bool hit_first = (h1.t_near < h2.t_near) ? h1.hit : h2.hit;
-			// bool hit_second = (h1.t_near < h2.t_near) ? h2.hit : h1.hit;
-			// float first_t_near = (h1.t_near < h2.t_near) ? h1.t_near : h2.t_near;
-			// float second_t_near = (h1.t_near < h2.t_near) ? h2.t_near : h1.t_near;
-			// float first_t_far = (h1.t_near < h2.t_near) ? h1.t_far : h2.t_far;
-			// float second_t_far = (h1.t_near < h2.t_near) ? h2.t_far : h1.t_far;
-
-			// if (hit_second) {
-			// 	stack[stack_pointer++] = { .idx=second_idx, .t_near=second_t_near, .t_far=second_t_far };
-			// }
-			// if (hit_first) {
-			// 	stack[stack_pointer++] = { .idx=first_idx, .t_near=first_t_near, .t_far=first_t_far };
-			// }
-
-			if (h1.hit) {
-				stack[stack_pointer++] = { .idx=left_idx, .t_near=h1.t_near, .t_far=h1.t_far };
-			}
-			if (h2.hit) {
-				stack[stack_pointer++] = { .idx=right_idx, .t_near=h2.t_near, .t_far=h2.t_far };
-			}
-		}
-	}
-
-	ray_render_composing<CHANNELS>(
-		pixel_x_coord,
-		pixel_y_coord,
-		H,
-		W,
-		gaussian_idx,
-		gaussians,
-		gaussian_depths,
-		means2D,
-		bg_color,
-		colors_precomp,
-		conic_opacity,
-		out_color
-	);
-	// printf("Total intersections for pixel (%d, %d): %d. Color: (%f, %f, %f)\n", pixel_x_coord, pixel_y_coord, gaussian_idx, out_color[pixel_id], out_color[H * W + pixel_id], out_color[2 * H * W + pixel_id]);
-}
-
 char* readFile(const char* filename, size_t* size) {
     // Open the file in binary mode and get its size
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
@@ -824,7 +565,7 @@ __global__ void collect_and_sort(	int W, int H,
 }
 
 template <uint32_t CHANNELS>
-void build_optix_bvh(const int W, const int H, const int P, float *vertices, float *radii, float *d_aabbBuffer, float tanfovx, float tanfovy, float *viewmatrix_inv, float *cam_pos, float *depths,
+void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer, float tanfovx, float tanfovy, float *viewmatrix_inv, float *cam_pos, float *depths,
 									float2 *means2D,
 									const float *bg_color,
 									const float* colors_precomp,
@@ -1074,8 +815,8 @@ void build_optix_bvh(const int W, const int H, const int P, float *vertices, flo
 	// 	printf("%f \n", a[i]);
 	// }
 
-	CUdeviceptr d_vertices = (CUdeviceptr)vertices;
-	CUdeviceptr d_radii = (CUdeviceptr)radii;
+	// CUdeviceptr d_vertices = (CUdeviceptr)vertices;
+	// CUdeviceptr d_radii = (CUdeviceptr)radii;
 	CUdeviceptr d_aabbs = (CUdeviceptr)d_aabbBuffer;
 
 	// Setup primitives
@@ -1238,34 +979,12 @@ void build_optix_bvh(const int W, const int H, const int P, float *vertices, flo
 	duration = end - start;
 	printf("Ray tracing took %lf seconds\n", duration.count());
 
-    int *gaussians = (int *)malloc(W * H * 1024 * sizeof(int));
-    memset(gaussians, 0, W * H * 1024 * sizeof(int));
-	CHECK_CUDA(cudaMemcpy((void *)gaussians, (void *)p.gaussians, W * H * 1024 * sizeof(int), cudaMemcpyDeviceToHost), true);
-
-	printf("Printing n_gaussians!\n");
-    int *n_gaussians = (int *)malloc(W * H * sizeof(int));
-    memset(n_gaussians, 0, W * H * sizeof(int));
-	CHECK_CUDA(cudaMemcpy((void *)n_gaussians, (void *)p.n_gaussians, W * H * sizeof(int), cudaMemcpyDeviceToHost), true);
-
-	int count = 0;
-
-	int max_value = 0;
-	for (int i = 0; i < W * H; i++) {
-		if (n_gaussians[i] > max_value) {
-			max_value = n_gaussians[i];
-		}
-		count += n_gaussians[i];
-	}
-
 	// Now we sort and alpha-compose
-	printf("Max: %d\n", max_value);
-	printf("Total ray intersections: %d\n", count);
-
 	start = std::chrono::high_resolution_clock::now();
 	int threads_per_block = 256;
 	int blocks = (W * H + threads_per_block - 1) / threads_per_block;
 	collect_and_sort<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (int *)p.gaussians, (float *)depths, (int *)p.n_gaussians, means2D, bg_color, colors_precomp, conic_opacity, out_color);
-	cudaDeviceSynchronize();
+	CHECK_CUDA(cudaDeviceSynchronize(), true);
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
 	printf("Sort and compose took %lf seconds\n", duration.count());
@@ -1285,10 +1004,6 @@ void FORWARD::ray_render(
 	const float tanfovx,
 	const float tanfovy,
 	const glm::vec3* cam_pos,
-	const int BVH_N,
-	const struct bvh_node* bvh_nodes,
-	const struct bvh_aabb* bvh_aabbs,
-	float *radius,
 	float *aabbs,
 	// Information used to compute 2D projection color
 	float *means3D,
@@ -1300,40 +1015,8 @@ void FORWARD::ray_render(
 	// Output
 	float* out_color)
 {
-
 	cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024);
-	build_optix_bvh<NUM_CHANNELS> (W, H, P, means3D, radius, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths, means2D, bg_color, colors_precomp, conic_opacity, out_color);
-	return;
-
-	auto start = std::chrono::high_resolution_clock::now();
-	printf("Ray render %d x %d for %d channels\n", W, H, NUM_CHANNELS);
-	dim3 threads_per_block(4, 4);
-	dim3 num_blocks((W + threads_per_block.x - 1) / threads_per_block.x, (H + threads_per_block.y - 1) / threads_per_block.y);
-	ray_render_cuda<NUM_CHANNELS> <<<num_blocks, threads_per_block>>> (
-		P, W, H,
-		znear, zfar,
-		viewmatrix,
-		viewmatrix_inv,
-		projmatrix,
-		tanfovx,
-		tanfovy,
-		cam_pos,
-		BVH_N,
-		bvh_nodes,
-		bvh_aabbs,
-		means2D,
-		bg_color,
-		depths,
-		colors_precomp,
-		conic_opacity,
-		out_color
-	);
-	cudaDeviceSynchronize();
-	printf("Ray render done\n");
-
-	auto end = std::chrono::high_resolution_clock::now();
-	std::chrono::duration<double> duration = end - start;
-	printf("Time taken %lf seconds\n", duration.count());
+	build_optix_bvh<NUM_CHANNELS> (W, H, P, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths, means2D, bg_color, colors_precomp, conic_opacity, out_color);
 }
 
 void FORWARD::render(

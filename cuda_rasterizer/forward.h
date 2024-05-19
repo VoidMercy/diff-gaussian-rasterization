@@ -75,10 +75,6 @@ namespace FORWARD
 		const float tanfovx,
 		const float tanfovy,
 		const glm::vec3* cam_pos,
-		const int BVH_N,
-		const struct bvh_node* bvh_nodes,
-		const struct bvh_aabb* bvh_aabbs,
-		float *radius,
 		float *aabbs,
 		// Information used to compute 2D projection color
 		float* means3D,
