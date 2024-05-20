@@ -45,6 +45,24 @@ namespace cg = cooperative_groups;
   } \
 }
 
+uint32_t countMsb(uint32_t n)
+{
+	uint32_t msb = sizeof(n) * 4;
+	uint32_t step = msb;
+	while (step > 1)
+	{
+		step /= 2;
+		if (n >> msb)
+			msb += step;
+		else
+			msb -= step;
+	}
+	if (n >> msb)
+		msb++;
+	return msb;
+}
+
+
 // Forward method for converting the input spherical harmonics
 // coefficients of each Gaussian to a simple RGB color.
 __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, bool* clamped)
@@ -502,7 +520,7 @@ __global__ void collect_and_sort(	int W, int H,
 									float *out_color
 								) {
 	int gaussians[1024];
-	float depths[1024];
+	uint32_t depths[1024];
 
 	int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (pixel_id >= W * H) {
@@ -516,12 +534,12 @@ __global__ void collect_and_sort(	int W, int H,
     // Collect
     for (int i = 0; i < N_GAUSSIANS; i++) {
     	gaussians[i] = d_gaussians[i * W * H + pixel_id];
-    	depths[i] = d_depths[d_gaussians[i * W * H + pixel_id]];
+    	depths[i] = *((uint32_t *)&d_depths[d_gaussians[i * W * H + pixel_id]]);
     }
 
     // Sort
-	// __syncthreads();
-    // thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
+	__syncthreads();
+    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
 
     // Compose
 	__syncthreads();
@@ -562,6 +580,173 @@ __global__ void collect_and_sort(	int W, int H,
     for (int ch = 0; ch < CHANNELS; ch++) {
 		out_color[ch * H * W + pix_id] = accumulated_color[ch] + bg_color[ch] * T;
     }
+}
+
+__global__ void collect_reorder(	int W, int H,
+									int *d_gaussians,
+									float *d_depths,
+									int *n_gaussians,
+									int *d_out_gaussians,
+									float *d_out_depths
+								) {
+	int gaussians[1024];
+	float depths[1024];
+
+	int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
+	if (pixel_id >= W * H) {
+		return;
+	}
+	int x = pixel_id % W;
+	int y = pixel_id / W;
+
+    int N_GAUSSIANS = n_gaussians[pixel_id];
+
+    // Collect
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+    	gaussians[i] = d_gaussians[i * W * H + pixel_id];
+    	depths[i] = d_depths[d_gaussians[i * W * H + pixel_id]];
+    }
+
+    __syncthreads();
+    // Reorder
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+    	d_out_gaussians[pixel_id * 1024 + i] = gaussians[i];
+    	d_out_depths[pixel_id * 1024 + i] = depths[i];
+    }
+}
+
+template <uint32_t CHANNELS>
+__global__ void composing(int P, int W, int H, int num_rendered, int *prefix_sum, int *n_gaussians, int *gaussians,
+ 									float2 *means2D,
+									const float *bg_color,
+				    				const float* colors_precomp,
+									float4 *conic_opacity,
+									float *out_color) {
+	int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
+	if (pixel_id >= W * H) {
+		return;
+	}
+	int x = pixel_id % W;
+	int y = pixel_id / W;
+
+	int N_GAUSSIANS = n_gaussians[pixel_id];
+	int offset = pixel_id == 0 ? 0 : prefix_sum[pixel_id - 1];
+
+	float accumulated_color[CHANNELS] = { 0.0f };
+	float T = 1.0f;  // Start with full transmittance
+	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+        int index = gaussians[offset + i];
+        float4 con_o = conic_opacity[index];
+        float2 gaussian_mean = means2D[index];
+
+        // Compute power using conic matrix
+        float2 d = {x - gaussian_mean.x, y - gaussian_mean.y};
+        float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+        if (power > 0.0f)
+            continue;
+
+        // Compute alpha
+        float alpha = min(exp(power) * con_o.w, 0.99f);
+        if (alpha < 1.0f / 255.0f)
+			continue;	// Skip if alpha is too small
+
+		// Update transmittance
+        float test_T = T * (1 - alpha);
+        if (test_T < 0.0001f)
+            break;  	// Stop if transmittance is negligible
+
+		// Accumulate color
+		for (int ch = 0; ch < CHANNELS; ch++) {
+			accumulated_color[ch] += colors_precomp[index * CHANNELS + ch] * alpha * T;
+		}
+
+        T = test_T;  	// Update the transmittance
+    }
+
+	__syncthreads();
+    for (int ch = 0; ch < CHANNELS; ch++) {
+		out_color[ch * H * W + pixel_id] = accumulated_color[ch] + bg_color[ch] * T;
+    }
+}
+
+#define COLLECT_THREADS 6
+
+__global__ void collect_keys(int W, int H, int num_rendered, int *prefix_sum, int *n_gaussians, int *d_gaussians, float *d_depths, uint32_t *keys, int *values) {
+
+	// int gaussians[1024];
+	// float depths[1024];
+
+	// int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
+	// if (pixel_id >= W * H) {
+	// 	return;
+	// }
+	// int x = pixel_id % W;
+	// int y = pixel_id / W;
+
+    // int N_GAUSSIANS = n_gaussians[pixel_id];
+
+    // // Collect
+    // for (int i = 0; i < N_GAUSSIANS; i++) {
+    // 	gaussians[i] = d_gaussians[i * W * H + pixel_id];
+    // 	depths[i] = d_depths[d_gaussians[i * W * H + pixel_id]];
+    // }
+
+    // __syncthreads();
+    // // Reorder
+    // int offset = (pixel_id == 0) ? 0 : prefix_sum[pixel_id - 1];
+    // for (int i = 0; i < N_GAUSSIANS; i++) {
+    // 	keys[(offset + i)*2] = *((uint32_t *)&depths[i]);
+    // 	keys[(offset + i)*2+1] = pixel_id;
+    // 	values[offset + i] = gaussians[i];
+    // }
+
+	__shared__ int gaussians[COLLECT_THREADS * 1024];
+	__shared__ uint32_t depths[COLLECT_THREADS * 1024];
+	int thread_num = threadIdx.x;
+	int block_num = blockIdx.x;
+	int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (pixel_id >= W * H) {
+		return;
+	}
+
+	int base_pixel_id = block_num * blockDim.x;
+	int end_pixel_id = base_pixel_id + blockDim.x;
+	if (end_pixel_id > W * H) {
+		end_pixel_id = W * H;
+	}
+
+	int base_pixel_offset = (base_pixel_id == 0) ? 0 : prefix_sum[base_pixel_id - 1];
+	int end_pixel_offset = (end_pixel_id == W * H) ? num_rendered : prefix_sum[end_pixel_id];
+	int footprint = end_pixel_offset - base_pixel_offset;
+
+	int offset = pixel_id == 0 ? 0 : prefix_sum[pixel_id - 1];
+	int N_GAUSSIANS = n_gaussians[pixel_id];
+
+	
+	int n_pixels = end_pixel_id - base_pixel_id;
+
+	// Go per-pixel and load its footprint
+	for (int i = 0; i < N_GAUSSIANS; i++) {
+		gaussians[offset + i - base_pixel_offset] = d_gaussians[i * W * H + pixel_id];
+		depths[offset + i - base_pixel_offset] = *((uint32_t *)&d_depths[gaussians[offset + i - base_pixel_offset]]);
+		keys[(offset + i)*2 + 1] = pixel_id;
+	}
+
+    __syncthreads();
+    // Reorder
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+    	keys[(offset + i)*2] = *((uint32_t *)&depths[offset + i - base_pixel_offset]);
+    	values[offset + i] = gaussians[offset + i - base_pixel_offset];
+    }
+
+	// __syncthreads();
+	// // Now write footprint to memory
+	// for (int i = base_pixel_offset + thread_num; i < end_pixel_offset; i += blockDim.x) {
+	// 	keys[i * 2] = depths[i - base_pixel_offset];
+	// 	values[i] = gaussians[i - base_pixel_offset];
+	// }
 }
 
 template <uint32_t CHANNELS>
@@ -942,11 +1127,16 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 
 	Params p;
 
-	// Set-up params on CPU side
-	CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &p.gaussians ), W*H*sizeof(int)*1024 ), true);
-	CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &p.n_gaussians ), W*H*sizeof(int) ), true);
-	CHECK_CUDA(cudaMemset((void *)p.n_gaussians, 0, W * H * sizeof(int)), true);
+	CUdeviceptr gaussians;
+	CUdeviceptr n_gaussians;
 
+	// Set-up params on CPU side
+	CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &gaussians ), W*H*sizeof(int)*1024 ), true);
+	CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &n_gaussians), W*H*sizeof(int) ), true);
+	CHECK_CUDA(cudaMemset((void *)gaussians, 0, W * H * sizeof(int)), true);
+
+	p.gaussians = gaussians;
+	p.n_gaussians = n_gaussians;
 	p.width = W;
 	p.height = H;
 	p.tanfovx = tanfovx;
@@ -972,22 +1162,110 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 
 	// Wait for stream to be done
 	CHECK_CUDA(cudaStreamSynchronize(cuStream), true);
-    CHECK_CUDA(cudaStreamDestroy(cuStream), true);
     CHECK_CUDA(cudaDeviceSynchronize(), true);
 
     end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
 	printf("Ray tracing took %lf seconds\n", duration.count());
 
+	// Radix sort
+	// start = std::chrono::high_resolution_clock::now();
+
+	// int *prefix_sum;
+	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &prefix_sum ), W*H*sizeof(int) ), true);
+	// size_t temp_storage_bytes;
+
+	// CHECK_CUDA((cub::DeviceScan::InclusiveSum<int *, int *>(nullptr, temp_storage_bytes, (int *)n_gaussians, prefix_sum, W*H)), true);
+	// CUdeviceptr d_temp_storage;
+	// printf("Bytes %ld\n", temp_storage_bytes);
+	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_temp_storage ), temp_storage_bytes ), true);
+	// CHECK_CUDA((cub::DeviceScan::InclusiveSum<int *, int *>((void *)d_temp_storage, temp_storage_bytes, (int *)n_gaussians, prefix_sum, W*H)), true);
+
+	// int num_rendered;
+	// CHECK_CUDA(cudaMemcpy(&num_rendered, &prefix_sum[W*H - 1], sizeof(int), cudaMemcpyDeviceToHost), true);
+	// printf("Num rendered: %d\n", num_rendered);
+
+	// uint64_t *d_keys, *d_keys_out;
+	// int *d_values, *d_values_out;
+	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_keys ), num_rendered*sizeof(uint64_t) ), true);
+	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_values ), num_rendered*sizeof(int) ), true);
+	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_keys_out ), num_rendered*sizeof(uint64_t) ), true);
+	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_values_out ), num_rendered*sizeof(int) ), true);
+
+	// int num_blocks = (W * H + COLLECT_THREADS - 1) / COLLECT_THREADS;
+	// // Collect keys and values
+	// collect_keys<<<num_blocks, COLLECT_THREADS>>>(W, H, num_rendered, prefix_sum, (int *)n_gaussians, (int *)gaussians, (float *)depths, (uint32_t *)d_keys, d_values);
+
+	// int bits = countMsb(W * H);
+
+	// // SortPairs
+	// CUdeviceptr d_temp_storage2;
+	// CHECK_CUDA((cub::DeviceRadixSort::SortPairs<uint64_t, int>(
+	// 	nullptr,
+	// 	temp_storage_bytes,
+	// 	(const uint64_t *)d_keys,
+	// 	d_keys_out,
+	// 	(const int *)d_values,
+	// 	d_values_out,
+	// 	num_rendered,
+	// 	0, 32 + bits
+	// )), true);
+
+	// printf("Bytes %ld\n", temp_storage_bytes);
+	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_temp_storage2 ), temp_storage_bytes ), true);
+
+	// CHECK_CUDA((cub::DeviceRadixSort::SortPairs<uint64_t, int>(
+	// 	(void *)d_temp_storage2,
+	// 	temp_storage_bytes,
+	// 	(const uint64_t *)d_keys,
+	// 	d_keys_out,
+	// 	(const int *)d_values,
+	// 	d_values_out,
+	// 	num_rendered,
+	// 	0, 32 + bits
+	// )), true);
+
+	// // const int DEBUG_N = 1024*256;
+	// // int *test = (int *)malloc(DEBUG_N * sizeof(int));
+	// // uint64_t *test_keys = (uint64_t *)malloc(DEBUG_N * sizeof(uint64_t));
+	// // CHECK_CUDA(cudaMemcpy((void *)test, (void *)d_values, DEBUG_N*sizeof(int), cudaMemcpyDeviceToHost), true);
+	// // CHECK_CUDA(cudaMemcpy((void *)test_keys, (void *)d_keys_out, DEBUG_N*sizeof(uint64_t), cudaMemcpyDeviceToHost), true);
+	// // for (int i = 0; i < DEBUG_N; i++) {
+	// // 	if (test[i] >= P) {
+	// // 		printf("L: %d, %d %lld\n", i, test[i], test_keys[i]);
+	// // 	}
+	// // }
+
+	// // int *test_n = (int *)malloc(5 * sizeof(int));
+	// // CHECK_CUDA(cudaMemcpy((void *)test_n, (void *)n_gaussians, 5*sizeof(int), cudaMemcpyDeviceToHost), true);
+	// // for (int i = 0; i < 5; i++) {
+	// // 	printf("N %d %d\n", i, test_n[i]);
+	// // }
+	// // return;
+
+	// // Compose
+	// printf("Now we compose\n");
+	// int threads_per_block = 16;
+	// int blocks = (W * H + threads_per_block - 1) / threads_per_block;
+	// composing<CHANNELS> <<<blocks, threads_per_block>>>(P, W, H, num_rendered, prefix_sum, (int *)p.n_gaussians, d_values, means2D, bg_color, colors_precomp, conic_opacity, out_color);
+
+	// cudaDeviceSynchronize();
+	// end = std::chrono::high_resolution_clock::now();
+	// duration = end - start;
+	// printf("Radix sort took %lf seconds\n", duration.count());
+
 	// Now we sort and alpha-compose
+	printf("Start alpha-compose\n");
 	start = std::chrono::high_resolution_clock::now();
-	int threads_per_block = 256;
+	int threads_per_block = 1;
 	int blocks = (W * H + threads_per_block - 1) / threads_per_block;
-	collect_and_sort<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (int *)p.gaussians, (float *)depths, (int *)p.n_gaussians, means2D, bg_color, colors_precomp, conic_opacity, out_color);
+	collect_and_sort<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (int *)gaussians, (float *)depths, (int *)n_gaussians, means2D, bg_color, colors_precomp, conic_opacity, out_color);
 	CHECK_CUDA(cudaDeviceSynchronize(), true);
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
 	printf("Sort and compose took %lf seconds\n", duration.count());
+
+    CHECK_CUDA(cudaStreamDestroy(cuStream), true);
 
 }
 
@@ -1015,7 +1293,6 @@ void FORWARD::ray_render(
 	// Output
 	float* out_color)
 {
-	cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024);
 	build_optix_bvh<NUM_CHANNELS> (W, H, P, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths, means2D, bg_color, colors_precomp, conic_opacity, out_color);
 }
 
@@ -1032,6 +1309,7 @@ void FORWARD::render(
 	const float* bg_color,
 	float* out_color)
 {
+	cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024*4);
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,

@@ -30,25 +30,6 @@ namespace cg = cooperative_groups;
 #include "forward.h"
 #include "backward.h"
 
-// Helper function to find the next-highest bit of the MSB
-// on the CPU.
-uint32_t getHigherMsb(uint32_t n)
-{
-	uint32_t msb = sizeof(n) * 4;
-	uint32_t step = msb;
-	while (step > 1)
-	{
-		step /= 2;
-		if (n >> msb)
-			msb += step;
-		else
-			msb -= step;
-	}
-	if (n >> msb)
-		msb++;
-	return msb;
-}
-
 // Wrapper method to call auxiliary coarse frustum containment test.
 // Mark all Gaussians that pass it.
 __global__ void checkFrustum(int P,
