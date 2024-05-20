@@ -277,6 +277,7 @@ int CudaRasterizer::Rasterizer::forward(
 		prefiltered
 	), debug)
 
+	const float* cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
 	CHECK_CUDA(FORWARD::ray_render(
 		P, width, height,
 		// information needed by ray tracer
@@ -291,6 +292,7 @@ int CudaRasterizer::Rasterizer::forward(
 		// information used to compute 2d projection color
 		(float *)means3D,
 		geomState.means2D,
+		cov3D_ptr,
 		background,
 		geomState.depths,
 		(colors_precomp != nullptr ? colors_precomp : geomState.rgb),

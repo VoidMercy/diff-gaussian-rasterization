@@ -590,6 +590,7 @@ __device__ void composing_3D(
     // float3 ray_origin,
     // float3 ray_direction,
     // float2 *t_bounds,
+	float tanfovx, float tanfovy,
 	float *d_aabbBuffer,
     float *viewmatrix_inv,
     float *cam_pos,
@@ -710,6 +711,8 @@ __device__ void composing_3D(
 template <uint32_t CHANNELS>
 void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer, float tanfovx, float tanfovy, float *viewmatrix_inv, float *cam_pos, float *depths,
 									float2 *means2D,
+									float *means3D,
+									float *cov3Ds,
 									const float *bg_color,
 									const float* colors_precomp,
 									float4 *conic_opacity,
@@ -1127,7 +1130,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	int threads_per_block = 256;
 	int blocks = (W * H + threads_per_block - 1) / threads_per_block;
 	composing<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (int *)p.gaussians, (float *)depths, (int *)p.n_gaussians, means2D, bg_color, colors_precomp, conic_opacity, out_color);
-	// composing_3D<CHANNELS> <<<blocks, threads_per_block>>>(W, H, d_aabbBuffer, viewmatrix_inv, cam_pos, (int *)p.gaussians, (int *)p.n_gaussians, (float3 *)p.mean3D, (float *)p.cov3D, bg_color, colors_precomp, conic_opacity, out_color);
+	// composing_3D<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (float)tanfovx, (float)tanfovy, d_aabbBuffer, viewmatrix_inv, cam_pos, (int *)p.gaussians, (int *)p.n_gaussians, (float3 *)means3D, (float *)cov3Ds, bg_color, colors_precomp, conic_opacity, out_color);
 	CHECK_CUDA(cudaDeviceSynchronize(), true);
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
@@ -1152,6 +1155,7 @@ void FORWARD::ray_render(
 	// Information used to compute 2D projection color
 	float *means3D,
 	float2* means2D,
+	float *cov3Ds,
 	const float* bg_color,
 	float *depths,
 	const float* colors_precomp,
@@ -1160,7 +1164,7 @@ void FORWARD::ray_render(
 	float* out_color)
 {
 	cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024);
-	build_optix_bvh<NUM_CHANNELS> (W, H, P, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths, means2D, bg_color, colors_precomp, conic_opacity, out_color);
+	build_optix_bvh<NUM_CHANNELS> (W, H, P, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths, means2D, means3D, cov3Ds, bg_color, colors_precomp, conic_opacity, out_color);
 }
 
 void FORWARD::render(
