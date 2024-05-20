@@ -492,16 +492,17 @@ static void context_log_cb( unsigned int level, const char* tag, const char* mes
 }
 
 template <uint32_t CHANNELS>
-__global__ void composing(	int W, int H,
-									int *d_gaussians,
-									float *d_depths,
-									int *n_gaussians,
-									float2 *means2D,
-									const float *bg_color,
-				    				const float* colors_precomp,
-									float4 *conic_opacity,
-									float *out_color
-								) {
+__global__ void composing(
+	int W, int H,
+	int *d_gaussians,
+	float *d_depths,
+	int *n_gaussians,
+	float2 *means2D,
+	const float *bg_color,
+	const float* colors_precomp,
+	float4 *conic_opacity,
+	float *out_color
+) {
 	int gaussians[1024];
 	float depths[1024];
 
@@ -565,12 +566,33 @@ __global__ void composing(	int W, int H,
     }
 }
 
+__device__ float2 intersect_ray_bbox(
+	float3 ray_origin, 
+	float3 ray_direction, 
+	float3 bbox_min, 
+	float3 bbox_max
+) {
+    float3 inv_dir = make_float3(1.0f) / ray_direction;
+    float3 t_min = (bbox_min - ray_origin) * inv_dir;
+    float3 t_max = (bbox_max - ray_origin) * inv_dir;
+    float3 t1 = fminf(t_min, t_max);
+    float3 t2 = fmaxf(t_min, t_max);
+
+    float t_near = fmaxf(fmaxf(t1.x, t1.y), t1.z);
+    float t_far = fminf(fminf(t2.x, t2.y), t2.z);
+
+    return make_float2(t_near, t_far);
+}
+
 template <uint32_t CHANNELS>
 __device__ void composing_3D(
     const int H, const int W,
-    float3 ray_origin,
-    float3 ray_direction,
-    float2 *t_bounds,
+    // float3 ray_origin,
+    // float3 ray_direction,
+    // float2 *t_bounds,
+	float *d_aabbBuffer,
+    float *viewmatrix_inv,
+    float *cam_pos,
 	int *d_gaussians,
     int *n_gaussians,
     float3 *mean3D,
@@ -588,6 +610,28 @@ __device__ void composing_3D(
 
     int N_GAUSSIANS = n_gaussians[pixel_id];
     if (N_GAUSSIANS == 0) return;  // Skip processing if no Gaussians
+
+	// Compute ray origin
+	float3 ray_origin = make_float3(cam_pos[0], cam_pos[1], cam_pos[2]);
+
+	// Compute ray direction
+    float3 ray_direction = normalize(make_float3(
+        (x - W / 2.0f) * tanfovx,
+        (y - H / 2.0f) * tanfovy,
+        -1.0f
+    ));
+	ray_direction = multiply_direction(viewmatrix_inv, ray_direction);
+    ray_direction = normalize(ray_direction);
+
+	// Compute intersections
+	float2 *t_bounds = new float2[n_gaussians[pixel_id]];
+	for (int i = 0; i < N_GAUSSIANS; i++) {
+		int idx = d_gaussians[i * W * H + pixel_id];
+		float3 bbox_min = make_float3(d_aabbBuffer[idx * 6 + 0], d_aabbBuffer[idx * 6 + 1], d_aabbBuffer[idx * 6 + 2]);
+		float3 bbox_max = make_float3(d_aabbBuffer[idx * 6 + 3], d_aabbBuffer[idx * 6 + 4], d_aabbBuffer[idx * 6 + 5]);
+
+		t_bounds[i] = intersect_ray_bbox(ray_origin, ray_direction, bbox_min, bbox_max);
+	}
 
     // Temporary arrays for sorting
     float *t_near = new float[N_GAUSSIANS];
@@ -1083,6 +1127,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	int threads_per_block = 256;
 	int blocks = (W * H + threads_per_block - 1) / threads_per_block;
 	composing<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (int *)p.gaussians, (float *)depths, (int *)p.n_gaussians, means2D, bg_color, colors_precomp, conic_opacity, out_color);
+	// composing_3D<CHANNELS> <<<blocks, threads_per_block>>>(W, H, d_aabbBuffer, viewmatrix_inv, cam_pos, (int *)p.gaussians, (int *)p.n_gaussians, (float3 *)p.mean3D, (float *)p.cov3D, bg_color, colors_precomp, conic_opacity, out_color);
 	CHECK_CUDA(cudaDeviceSynchronize(), true);
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
