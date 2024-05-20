@@ -566,25 +566,38 @@ __global__ void composing(	int W, int H,
 }
 
 template <uint32_t CHANNELS>
-__device__ void ray_render_composing_3D(
-    int x, int y,  			   // Pixel coordinates
-    const int H, const int W,  // Image dimensions
-    float3 ray_origin,         // Starting position of the ray
-    float3 ray_direction,      // Normalized direction vector of the ray
-    float2 *t_bounds,          // Array of near and far intersection points for each Gaussian
-    const int N_GAUSSIANS,     // Number of Gaussians
-    int *gaussians,            // Index array of Gaussians, to be sorted by t_near
-    float3 *mean3D,            // Mean positions in 3D space for each Gaussian
-    float *cov3D,              // Covariance (simplified as isotropic for this example)
-    const float *bg_color,     // Background color, assumed to be CHANNELS in size
-    const float* colors_precomp, // Precomputed colors for each Gaussian, CHANNELS per Gaussian
-    float4* conic_opacity,     // Opacity and additional parameters packed in float4
-    float *out_color           // Output color buffer for the entire image
+__device__ void composing_3D(
+    const int H, const int W,
+    float3 ray_origin,
+    float3 ray_direction,
+    float2 *t_bounds,
+	int *d_gaussians,
+    int *n_gaussians,
+    float3 *mean3D,
+    float *cov3D,
+    const float *bg_color,
+    const float* colors_precomp,
+    float4* conic_opacity,
+    float *out_color
 ) {
-    // Temporary arrays for efficient sorting
+    int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel_id >= W * H) return;
+
+    int x = pixel_id % W;
+    int y = pixel_id / W;
+
+    int N_GAUSSIANS = n_gaussians[pixel_id];
+    if (N_GAUSSIANS == 0) return;  // Skip processing if no Gaussians
+
+    // Temporary arrays for sorting
     float *t_near = new float[N_GAUSSIANS];
+    int *gaussians = new int[N_GAUSSIANS];
+
+    // Collect data for sorting
     for (int i = 0; i < N_GAUSSIANS; i++) {
-        t_near[i] = t_bounds[gaussians[i]].x;
+        int idx = d_gaussians[i * W * H + pixel_id];
+        gaussians[i] = idx;
+        t_near[i] = t_bounds[idx].x;
     }
 
     // Sort Gaussians by t_near
@@ -593,14 +606,10 @@ __device__ void ray_render_composing_3D(
     thrust::device_ptr<float> dev_t_near(t_near);
     thrust::sort_by_key(thrust::device, dev_t_near, dev_t_near + N_GAUSSIANS, dev_gaussians);
 
-    // Free temporary array
-    delete[] t_near;
-
+	// Compose
+	__syncthreads();
 	float accumulated_color[CHANNELS] = {0.0f};
     float T = 1.0f;  // Full transmittance initially
-
-    // Iterate over each Gaussian affecting the ray
-	__syncthreads();
     for (int i = 0; i < N_GAUSSIANS; i++) {
         int idx = gaussians[i];
         float3 gaussian_mean = mean3D[idx];
