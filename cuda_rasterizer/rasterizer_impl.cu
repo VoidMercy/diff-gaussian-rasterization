@@ -30,6 +30,25 @@ namespace cg = cooperative_groups;
 #include "forward.h"
 #include "backward.h"
 
+// Helper function to find the next-highest bit of the MSB
+// on the CPU.
+uint32_t getHigherMsb(uint32_t n)
+{
+	uint32_t msb = sizeof(n) * 4;
+	uint32_t step = msb;
+	while (step > 1)
+	{
+		step /= 2;
+		if (n >> msb)
+			msb += step;
+		else
+			msb -= step;
+	}
+	if (n >> msb)
+		msb++;
+	return msb;
+}
+
 // Wrapper method to call auxiliary coarse frustum containment test.
 // Mark all Gaussians that pass it.
 __global__ void checkFrustum(int P,
@@ -205,6 +224,7 @@ int CudaRasterizer::Rasterizer::forward(
 	int* radii,
 	bool debug)
 {
+	auto start = std::chrono::high_resolution_clock::now();
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
@@ -348,6 +368,9 @@ int CudaRasterizer::Rasterizer::forward(
 	    printf("cudaDeviceSynchronize failed: %s\n", cudaGetErrorString(cuda_err));
 	    // Handle the error appropriately, maybe exit the program or return an error code
 	}
+	auto end = std::chrono::high_resolution_clock::now();
+	std::chrono::duration<double> duration = end - start;
+	printf("Total time took: %lf second\n", duration.count());
 
 	return num_rendered;
 }

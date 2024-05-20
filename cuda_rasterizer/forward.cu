@@ -469,7 +469,8 @@ struct MissData
 
 struct HitGroupData
 {
-    // No data needed
+	float *aabb;
+	float *depths;
 };
 
 struct CallablesData
@@ -519,8 +520,7 @@ __global__ void collect_and_sort(	int W, int H,
 									float4 *conic_opacity,
 									float *out_color
 								) {
-	int gaussians[1024];
-	uint32_t depths[1024];
+	// int gaussians[1024];
 
 	int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (pixel_id >= W * H) {
@@ -532,22 +532,20 @@ __global__ void collect_and_sort(	int W, int H,
     int N_GAUSSIANS = n_gaussians[pixel_id];
 
     // Collect
-    for (int i = 0; i < N_GAUSSIANS; i++) {
-    	gaussians[i] = d_gaussians[i * W * H + pixel_id];
-    	depths[i] = *((uint32_t *)&d_depths[d_gaussians[i * W * H + pixel_id]]);
-    }
+    // for (int i = 0; i < N_GAUSSIANS; i++) {
+    // 	gaussians[i] = d_gaussians[i * W * H + pixel_id];
+    // }
 
     // Sort
-	__syncthreads();
-    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
+	// __syncthreads();
+    // thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
 
     // Compose
-	__syncthreads();
 	float accumulated_color[CHANNELS] = { 0.0f };
 	float T = 1.0f;  // Start with full transmittance
 	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
     for (int i = 0; i < N_GAUSSIANS; i++) {
-        int index = gaussians[i];
+        int index = d_gaussians[i * W * H + pixel_id];
         float4 con_o = conic_opacity[index];
         float2 gaussian_mean = means2D[index];
 
@@ -575,7 +573,6 @@ __global__ void collect_and_sort(	int W, int H,
         T = test_T;  	// Update the transmittance
     }
 
-	__syncthreads();
     int pix_id = y * W + x;
     for (int ch = 0; ch < CHANNELS; ch++) {
 		out_color[ch * H * W + pix_id] = accumulated_color[ch] + bg_color[ch] * T;
@@ -783,8 +780,8 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 
     pipeline_compile_options.usesMotionBlur = false;
     pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_ANY;
-    pipeline_compile_options.numPayloadValues = 6; // FIXME
-    pipeline_compile_options.numAttributeValues = 0; // FIXME
+    pipeline_compile_options.numPayloadValues = 8; // FIXME
+    pipeline_compile_options.numAttributeValues = 2; // FIXME
     pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
     pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
     pipeline_compile_options.usesPrimitiveTypeFlags = 0;
@@ -854,10 +851,10 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 
         OptixProgramGroupDesc hit_prog_group_desc = {};
         hit_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-        hit_prog_group_desc.hitgroup.moduleAH = ptx_module;
-        hit_prog_group_desc.hitgroup.entryFunctionNameAH = "__anyhit__ah";
-        // hit_prog_group_desc.hitgroup.moduleCH = ptx_module;
-        // hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+        // hit_prog_group_desc.hitgroup.moduleAH = ptx_module;
+        // hit_prog_group_desc.hitgroup.entryFunctionNameAH = "__anyhit__ah";
+        hit_prog_group_desc.hitgroup.moduleCH = ptx_module;
+        hit_prog_group_desc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
         hit_prog_group_desc.hitgroup.moduleIS            = ptx_module;
         hit_prog_group_desc.hitgroup.entryFunctionNameIS = "__intersection__is";
 
@@ -981,7 +978,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	size_t tempBufferSizeInBytes, outputBufferSizeInBytes;
 
 	memset( &accelOptions, 0, sizeof( OptixAccelBuildOptions ) );
-	accelOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
+	accelOptions.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
 	accelOptions.operation = OPTIX_BUILD_OPERATION_BUILD;
 	accelOptions.motionOptions.numKeys = 0;
 
@@ -1069,6 +1066,8 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
     CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_hitgroup_records ), hitgroup_record_size ), true);
 
     HitGroupRecord ah_sbt = {};
+    ah_sbt.data.aabb = (float *)d_aabbBuffer;
+    ah_sbt.data.depths = (float *)depths;
     OPTIX_CHECK( optixSbtRecordPackHeader( hit_prog_group, &ah_sbt ) );
 
     CHECK_CUDA(cudaMemcpy(
@@ -1168,6 +1167,13 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	duration = end - start;
 	printf("Ray tracing took %lf seconds\n", duration.count());
 
+	// int *test_n = (int *)malloc(5 * sizeof(int));
+	// CHECK_CUDA(cudaMemcpy((void *)test_n, (void *)n_gaussians, 5*sizeof(int), cudaMemcpyDeviceToHost), true);
+	// for (int i = 0; i < 5; i++) {
+	// 	printf("N %d %d\n", i, test_n[i]);
+	// }
+	// return;
+
 	// Radix sort
 	// start = std::chrono::high_resolution_clock::now();
 
@@ -1236,12 +1242,6 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	// // 	}
 	// // }
 
-	// // int *test_n = (int *)malloc(5 * sizeof(int));
-	// // CHECK_CUDA(cudaMemcpy((void *)test_n, (void *)n_gaussians, 5*sizeof(int), cudaMemcpyDeviceToHost), true);
-	// // for (int i = 0; i < 5; i++) {
-	// // 	printf("N %d %d\n", i, test_n[i]);
-	// // }
-	// // return;
 
 	// // Compose
 	// printf("Now we compose\n");
@@ -1255,7 +1255,6 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	// printf("Radix sort took %lf seconds\n", duration.count());
 
 	// Now we sort and alpha-compose
-	printf("Start alpha-compose\n");
 	start = std::chrono::high_resolution_clock::now();
 	int threads_per_block = 1;
 	int blocks = (W * H + threads_per_block - 1) / threads_per_block;
@@ -1263,7 +1262,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	CHECK_CUDA(cudaDeviceSynchronize(), true);
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
-	printf("Sort and compose took %lf seconds\n", duration.count());
+	printf("Alpha compose took %lf seconds\n", duration.count());
 
     CHECK_CUDA(cudaStreamDestroy(cuStream), true);
 
