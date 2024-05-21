@@ -79,6 +79,7 @@ namespace FORWARD
 		// Information used to compute 2D projection color
 		float* means3D,
 		float2* means2D,
+		const float *cov3Ds,
 		const float* bg_color,
 		float* depths,
 		const float* colors_precomp,

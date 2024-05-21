@@ -22,6 +22,8 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <cuda_runtime.h>
+#include <vector_functions.h>
 
 #include <chrono>
 
@@ -566,26 +568,8 @@ __global__ void composing(
     }
 }
 
-__device__ float2 intersect_ray_bbox(
-	float3 ray_origin, 
-	float3 ray_direction, 
-	float3 bbox_min, 
-	float3 bbox_max
-) {
-    float3 inv_dir = make_float3(1.0f) / ray_direction;
-    float3 t_min = (bbox_min - ray_origin) * inv_dir;
-    float3 t_max = (bbox_max - ray_origin) * inv_dir;
-    float3 t1 = fminf(t_min, t_max);
-    float3 t2 = fmaxf(t_min, t_max);
-
-    float t_near = fmaxf(fmaxf(t1.x, t1.y), t1.z);
-    float t_far = fminf(fminf(t2.x, t2.y), t2.z);
-
-    return make_float2(t_near, t_far);
-}
-
 template <uint32_t CHANNELS>
-__device__ void composing_3D(
+__global__ void composing_3D(
     const int H, const int W,
     // float3 ray_origin,
     // float3 ray_direction,
@@ -612,44 +596,67 @@ __device__ void composing_3D(
     int N_GAUSSIANS = n_gaussians[pixel_id];
     if (N_GAUSSIANS == 0) return;  // Skip processing if no Gaussians
 
-	// Compute ray origin
-	float3 ray_origin = make_float3(cam_pos[0], cam_pos[1], cam_pos[2]);
+	// Compute camera frustrum and pixel coordinates in view space
+    float right = tanfovx * 1.0;
+    float top = tanfovy * 1.0;
+    float pixel_view_x = right * 2.0 * ((float)(x + 0.5) / (float)W) - right;
+    float pixel_view_y = top * 2.0 * ((float)(y + 0.5) / (float)H) - top;
+    float3 pixel_v = make_float3(pixel_view_x, pixel_view_y, 1.0);
 
-	// Compute ray direction
-    float3 ray_direction = normalize(make_float3(
-        (x - W / 2.0f) * tanfovx,
-        (y - H / 2.0f) * tanfovy,
-        -1.0f
-    ));
-	ray_direction = multiply_direction(viewmatrix_inv, ray_direction);
-    ray_direction = normalize(ray_direction);
+	// Compute ray origin and direction
+	float3 pixel_w = transformPoint4x3(pixel_v, viewmatrix_inv);
+    glm::vec3 ray_origin = glm::vec3(cam_pos[0], cam_pos[1], cam_pos[2]);
+    glm::vec3 ray_direction = glm::normalize(glm::vec3(pixel_w.x, pixel_w.y, pixel_w.z) - ray_origin);
+
+	// float3 ray_origin = make_float3(cam_pos[0], cam_pos[1], cam_pos[2]);
+    // float3 ray_direction = normalize(make_float3(
+    //     (x - W / 2.0f) * tanfovx,
+    //     (y - H / 2.0f) * tanfovy,
+    //     -1.0f
+    // ));
+	// ray_direction = multiply_direction(viewmatrix_inv, ray_direction);
+    // ray_direction = normalize(ray_direction);
+
+	// Allocate memory for t_near and t_far
+    // float *t_near = new float[N_GAUSSIANS];
+    // float *t_far = new[N_GAUSSIANS];
+	float t_near[1024];
+	float t_far[1024];
 
 	// Compute intersections
-	float2 *t_bounds = new float2[n_gaussians[pixel_id]];
 	for (int i = 0; i < N_GAUSSIANS; i++) {
-		int idx = d_gaussians[i * W * H + pixel_id];
-		float3 bbox_min = make_float3(d_aabbBuffer[idx * 6 + 0], d_aabbBuffer[idx * 6 + 1], d_aabbBuffer[idx * 6 + 2]);
-		float3 bbox_max = make_float3(d_aabbBuffer[idx * 6 + 3], d_aabbBuffer[idx * 6 + 4], d_aabbBuffer[idx * 6 + 5]);
+        int idx = d_gaussians[i * W * H + pixel_id];
+        glm::vec3 bbox_min = glm::vec3(d_aabbBuffer[idx * 6 + 0], d_aabbBuffer[idx * 6 + 1], d_aabbBuffer[idx * 6 + 2]);
+        glm::vec3 bbox_max = glm::vec3(d_aabbBuffer[idx * 6 + 3], d_aabbBuffer[idx * 6 + 4], d_aabbBuffer[idx * 6 + 5]);
 
-		t_bounds[i] = intersect_ray_bbox(ray_origin, ray_direction, bbox_min, bbox_max);
+        glm::vec3 inv_dir = 1.0f / ray_direction;
+        glm::vec3 t_min = (bbox_min - ray_origin) * inv_dir;
+        glm::vec3 t_max = (bbox_max - ray_origin) * inv_dir;
+
+        glm::vec3 t1 = glm::min(t_min, t_max);
+        glm::vec3 t2 = glm::max(t_min, t_max);
+
+        float t_near_val = fmax(fmax(t1.x, t1.y), t1.z);
+        float t_far_val = fmin(fmin(t2.x, t2.y), t2.z);
+
+        if (t_near_val <= t_far_val && t_far_val >= 0) {
+            t_near[i] = t_near_val;
+            t_far[i] = t_far_val;
+        }
 	}
 
     // Temporary arrays for sorting
-    float *t_near = new float[N_GAUSSIANS];
     int *gaussians = new int[N_GAUSSIANS];
 
     // Collect data for sorting
     for (int i = 0; i < N_GAUSSIANS; i++) {
         int idx = d_gaussians[i * W * H + pixel_id];
         gaussians[i] = idx;
-        t_near[i] = t_bounds[idx].x;
     }
 
     // Sort Gaussians by t_near
 	__syncthreads();
-    thrust::device_ptr<int> dev_gaussians(gaussians);
-    thrust::device_ptr<float> dev_t_near(t_near);
-    thrust::sort_by_key(thrust::device, dev_t_near, dev_t_near + N_GAUSSIANS, dev_gaussians);
+    thrust::sort_by_key(thrust::seq, t_near, t_near + N_GAUSSIANS, gaussians);
 
 	// Compose
 	__syncthreads();
@@ -663,8 +670,8 @@ __device__ void composing_3D(
         float alpha = color_and_opacity.w;
 
         // Ray-Gaussian intersection bounds
-        float t_start = t_bounds[idx].x;
-        float t_end = t_bounds[idx].y;
+        float t_start = t_near[idx];
+        float t_end = t_far[idx];
         if (t_start > t_end) continue;
 
 		// Discretization steps
@@ -706,13 +713,17 @@ __device__ void composing_3D(
     for (int ch = 0; ch < CHANNELS; ch++) {
         out_color[pix_id * CHANNELS + ch] = accumulated_color[ch] + bg_color[ch] * T;
     }
+
+	// Clean up
+    // delete[] t_near;
+    // delete[] t_far;
 }
 
 template <uint32_t CHANNELS>
 void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer, float tanfovx, float tanfovy, float *viewmatrix_inv, float *cam_pos, float *depths,
 									float2 *means2D,
 									float *means3D,
-									float *cov3Ds,
+									const float *cov3Ds,
 									const float *bg_color,
 									const float* colors_precomp,
 									float4 *conic_opacity,
@@ -1135,7 +1146,6 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
 	printf("Sort and compose took %lf seconds\n", duration.count());
-
 }
 
 void FORWARD::ray_render(
@@ -1155,7 +1165,7 @@ void FORWARD::ray_render(
 	// Information used to compute 2D projection color
 	float *means3D,
 	float2* means2D,
-	float *cov3Ds,
+	const float *cov3Ds,
 	const float* bg_color,
 	float *depths,
 	const float* colors_precomp,
