@@ -19,6 +19,8 @@
 #include <thrust/sort.h>
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/tuple.h>
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -524,8 +526,10 @@ __global__ void composing(
     }
 
     // Sort
-	// __syncthreads();
-    // thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
+	__syncthreads();
+	thrust::device_ptr<float> dev_depths(depths);
+	thrust::device_ptr<int> dev_gaussians(gaussians);
+    thrust::sort_by_key(thrust::seq, dev_depths, dev_depths + N_GAUSSIANS, dev_gaussians);
 
     // Compose
 	__syncthreads();
@@ -608,24 +612,15 @@ __global__ void composing_3D(
     glm::vec3 ray_origin = glm::vec3(cam_pos[0], cam_pos[1], cam_pos[2]);
     glm::vec3 ray_direction = glm::normalize(glm::vec3(pixel_w.x, pixel_w.y, pixel_w.z) - ray_origin);
 
-	// float3 ray_origin = make_float3(cam_pos[0], cam_pos[1], cam_pos[2]);
-    // float3 ray_direction = normalize(make_float3(
-    //     (x - W / 2.0f) * tanfovx,
-    //     (y - H / 2.0f) * tanfovy,
-    //     -1.0f
-    // ));
-	// ray_direction = multiply_direction(viewmatrix_inv, ray_direction);
-    // ray_direction = normalize(ray_direction);
-
-	// Allocate memory for t_near and t_far
-    // float *t_near = new float[N_GAUSSIANS];
-    // float *t_far = new[N_GAUSSIANS];
+	// Allocate memory
 	float t_near[1024];
 	float t_far[1024];
+	int gaussians[1024];
 
 	// Compute intersections
 	for (int i = 0; i < N_GAUSSIANS; i++) {
         int idx = d_gaussians[i * W * H + pixel_id];
+
         glm::vec3 bbox_min = glm::vec3(d_aabbBuffer[idx * 6 + 0], d_aabbBuffer[idx * 6 + 1], d_aabbBuffer[idx * 6 + 2]);
         glm::vec3 bbox_max = glm::vec3(d_aabbBuffer[idx * 6 + 3], d_aabbBuffer[idx * 6 + 4], d_aabbBuffer[idx * 6 + 5]);
 
@@ -639,43 +634,45 @@ __global__ void composing_3D(
         float t_near_val = fmax(fmax(t1.x, t1.y), t1.z);
         float t_far_val = fmin(fmin(t2.x, t2.y), t2.z);
 
+		// Collect data for sorting
+		gaussians[i] = idx;
         if (t_near_val <= t_far_val && t_far_val >= 0) {
             t_near[i] = t_near_val;
             t_far[i] = t_far_val;
         }
 	}
 
-    // Temporary arrays for sorting
-    int *gaussians = new int[N_GAUSSIANS];
-
-    // Collect data for sorting
-    for (int i = 0; i < N_GAUSSIANS; i++) {
-        int idx = d_gaussians[i * W * H + pixel_id];
-        gaussians[i] = idx;
-    }
-
     // Sort Gaussians by t_near
 	__syncthreads();
-    thrust::sort_by_key(thrust::seq, t_near, t_near + N_GAUSSIANS, gaussians);
+	thrust::device_ptr<float> dev_t_near(t_near);
+    thrust::device_ptr<float> dev_t_far(t_far);
+    thrust::device_ptr<int> dev_gaussians(gaussians);
+
+	auto first = thrust::make_zip_iterator(thrust::make_tuple(dev_t_near, dev_t_far, dev_gaussians));
+	auto last = first + N_GAUSSIANS;
+	thrust::sort_by_key(thrust::seq, dev_t_near, dev_t_near + N_GAUSSIANS, first);
+
 
 	// Compose
 	__syncthreads();
 	float accumulated_color[CHANNELS] = {0.0f};
     float T = 1.0f;  // Full transmittance initially
     for (int i = 0; i < N_GAUSSIANS; i++) {
+		// printf("Processing gaussian %d\n", i);
         int idx = gaussians[i];
         float3 gaussian_mean = mean3D[idx];
-        float covariance = cov3D[idx];  // Assuming isotropic for simplification
+        float covariance = cov3D[idx];
         float4 color_and_opacity = conic_opacity[idx];
         float alpha = color_and_opacity.w;
 
         // Ray-Gaussian intersection bounds
-        float t_start = t_near[idx];
-        float t_end = t_far[idx];
-        if (t_start > t_end) continue;
+        float t_start = t_near[i];
+        float t_end = t_far[i];
+        if (t_start >= t_end) continue;
 
 		// Discretization steps
-        float dt = (t_end - t_start) / 10.0f;
+        float dt = (t_end - t_start) / 3.0f;
+		// printf("dt %f\n", i);
 
         // March along the ray within the bounds of the current Gaussian
         for (float t_curr = t_start; t_curr <= t_end; t_curr += dt) {
@@ -713,10 +710,6 @@ __global__ void composing_3D(
     for (int ch = 0; ch < CHANNELS; ch++) {
         out_color[pix_id * CHANNELS + ch] = accumulated_color[ch] + bg_color[ch] * T;
     }
-
-	// Clean up
-    // delete[] t_near;
-    // delete[] t_far;
 }
 
 template <uint32_t CHANNELS>
