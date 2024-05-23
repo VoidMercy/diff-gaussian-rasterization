@@ -647,11 +647,9 @@ __global__ void composing_3D(
 	thrust::device_ptr<float> dev_t_near(t_near);
     thrust::device_ptr<float> dev_t_far(t_far);
     thrust::device_ptr<int> dev_gaussians(gaussians);
-
 	auto first = thrust::make_zip_iterator(thrust::make_tuple(dev_t_near, dev_t_far, dev_gaussians));
 	auto last = first + N_GAUSSIANS;
 	thrust::sort_by_key(thrust::seq, dev_t_near, dev_t_near + N_GAUSSIANS, first);
-
 
 	// Compose
 	__syncthreads();
@@ -672,37 +670,54 @@ __global__ void composing_3D(
 
 		// Discretization steps
         float dt = (t_end - t_start) / 3.0f;
-		// printf("dt %f\n", i);
 
-        // March along the ray within the bounds of the current Gaussian
-        for (float t_curr = t_start; t_curr <= t_end; t_curr += dt) {
-			float3 sample_point;
-            sample_point.x = ray_origin.x + t_curr * ray_direction.x;
-            sample_point.y = ray_origin.y + t_curr * ray_direction.y;
-            sample_point.z = ray_origin.z + t_curr * ray_direction.z;
-
+		// Directly use mean point color if dt too small 
+		if (dt < 0.001f) {
 			float3 diff;
-            diff.x = sample_point.x - gaussian_mean.x;
-            diff.y = sample_point.y - gaussian_mean.y;
-            diff.z = sample_point.z - gaussian_mean.z;
+			diff.x = gaussian_mean.x - ray_origin.x;
+			diff.y = gaussian_mean.y - ray_origin.y;
+			diff.z = gaussian_mean.z - ray_origin.z;
 
 			float distance2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
 			float density = expf(-0.5f * distance2 / covariance);
+			float sample_alpha = min(density * alpha, 1.0f - T);
 
-            float sample_alpha = density * alpha * dt;
-            if (sample_alpha < 0.0001f) continue; 		// Skip negligible contributions
-            sample_alpha = min(sample_alpha, 1.0f - T); // Clamp to remaining transmittance
+			for (int ch = 0; ch < CHANNELS; ch++) {
+				accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * sample_alpha * T;
+			}
 
-            // Blend colors
-            for (int ch = 0; ch < CHANNELS; ch++) {
-                accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * sample_alpha;
-            }
+			T *= (1.0f - sample_alpha);
+			if (T < 0.01f) break;
+		} 
+		// Else march along the ray within the bounds of the current Gaussian
+		else {
+			// printf("i %d, dt = %f\n", i, dt);
+			for (float t_curr = t_start; t_curr <= t_end; t_curr += dt) {
+				float3 sample_point;
+				sample_point.x = ray_origin.x + t_curr * ray_direction.x;
+				sample_point.y = ray_origin.y + t_curr * ray_direction.y;
+				sample_point.z = ray_origin.z + t_curr * ray_direction.z;
 
-            T *= (1.0f - sample_alpha); // Update remaining transmittance
-            if (T < 0.01f) break; 		// Early termination if opaque
-        }
+				float3 diff;
+				diff.x = sample_point.x - gaussian_mean.x;
+				diff.y = sample_point.y - gaussian_mean.y;
+				diff.z = sample_point.z - gaussian_mean.z;
 
-        if (T < 0.01f) break; // Early termination if opaque
+				float distance2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+				float density = expf(-0.5f * distance2 / covariance);
+
+				float sample_alpha = density * alpha * dt;
+				if (sample_alpha < 0.0001f) continue; 		// Skip negligible contributions
+				sample_alpha = min(sample_alpha, 1.0f - T); // Clamp to remaining transmittance
+
+				for (int ch = 0; ch < CHANNELS; ch++) {
+					accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * sample_alpha * T;
+				}
+
+				T *= (1.0f - sample_alpha); // Update remaining transmittance
+				if (T < 0.01f) break; 		// Early termination if opaque
+			}
+		}
     }
 
 	__syncthreads();
@@ -1133,8 +1148,8 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	start = std::chrono::high_resolution_clock::now();
 	int threads_per_block = 256;
 	int blocks = (W * H + threads_per_block - 1) / threads_per_block;
-	composing<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (int *)p.gaussians, (float *)depths, (int *)p.n_gaussians, means2D, bg_color, colors_precomp, conic_opacity, out_color);
-	// composing_3D<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (float)tanfovx, (float)tanfovy, d_aabbBuffer, viewmatrix_inv, cam_pos, (int *)p.gaussians, (int *)p.n_gaussians, (float3 *)means3D, (float *)cov3Ds, bg_color, colors_precomp, conic_opacity, out_color);
+	// composing<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (int *)p.gaussians, (float *)depths, (int *)p.n_gaussians, means2D, bg_color, colors_precomp, conic_opacity, out_color);
+	composing_3D<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (float)tanfovx, (float)tanfovy, d_aabbBuffer, viewmatrix_inv, cam_pos, (int *)p.gaussians, (int *)p.n_gaussians, (float3 *)means3D, (float *)cov3Ds, bg_color, colors_precomp, conic_opacity, out_color);
 	CHECK_CUDA(cudaDeviceSynchronize(), true);
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
