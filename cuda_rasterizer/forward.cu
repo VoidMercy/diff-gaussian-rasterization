@@ -655,13 +655,12 @@ __global__ void composing_3D(
 	__syncthreads();
 	float accumulated_color[CHANNELS] = {0.0f};
     float T = 1.0f;  // Full transmittance initially
-    for (int i = 0; i < N_GAUSSIANS; i++) {
-		// printf("Processing gaussian %d\n", i);
+	bool done = false;
+    for (int i = 0; !done && i < N_GAUSSIANS; i++) {
         int idx = gaussians[i];
         float3 gaussian_mean = mean3D[idx];
         float covariance = cov3D[idx];
-        float4 color_and_opacity = conic_opacity[idx];
-        float alpha = color_and_opacity.w;
+        float4 con_o = conic_opacity[idx];
 
         // Ray-Gaussian intersection bounds
         float t_start = t_near[i];
@@ -671,23 +670,42 @@ __global__ void composing_3D(
 		// Discretization steps
         float dt = (t_end - t_start) / 3.0f;
 
-		// Directly use mean point color if dt too small 
-		if (dt < 0.001f) {
+		// Directly use mean point if dt too small 
+		if (dt < 0.0001f) {
+			float t_curr = (t_start + t_end) / 2.0f;
+
+			float3 sample_point;
+			sample_point.x = ray_origin.x + t_curr * ray_direction.x;
+			sample_point.y = ray_origin.y + t_curr * ray_direction.y;
+			sample_point.z = ray_origin.z + t_curr * ray_direction.z;
+
 			float3 diff;
-			diff.x = gaussian_mean.x - ray_origin.x;
-			diff.y = gaussian_mean.y - ray_origin.y;
-			diff.z = gaussian_mean.z - ray_origin.z;
+			diff.x = gaussian_mean.x - sample_point.x;
+			diff.y = gaussian_mean.y - sample_point.y;
+			diff.z = gaussian_mean.z - sample_point.z;
 
+			// Compute power using conic matrix
 			float distance2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
-			float density = expf(-0.5f * distance2 / covariance);
-			float sample_alpha = min(density * alpha, 1.0f - T);
+			float power = -0.5f * distance2 / covariance;
+			if (power > 0.0f) continue;
 
-			for (int ch = 0; ch < CHANNELS; ch++) {
-				accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * sample_alpha * T;
+			// Compute alpha
+			float alpha = min(expf(power) * con_o.w, 0.99f);
+			if (alpha < 1.0f / 255.0f) continue;
+			
+			// Update transmittance
+			float test_T = T * (1 - alpha);
+			if (test_T < 0.0001f) {
+				done = true;
+				continue;
 			}
 
-			T *= (1.0f - sample_alpha);
-			if (T < 0.01f) break;
+			// Accumulate color
+			for (int ch = 0; ch < CHANNELS; ch++) {
+				accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * alpha * T;
+			}
+
+			T = test_T;	// Update transmittance
 		} 
 		// Else march along the ray within the bounds of the current Gaussian
 		else {
@@ -703,19 +721,28 @@ __global__ void composing_3D(
 				diff.y = sample_point.y - gaussian_mean.y;
 				diff.z = sample_point.z - gaussian_mean.z;
 
+				// Compute power using conic matrix
 				float distance2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
-				float density = expf(-0.5f * distance2 / covariance);
+				float power = -0.5f * distance2 / covariance;
+				if (power > 0.0f) continue;
 
-				float sample_alpha = density * alpha * dt;
-				if (sample_alpha < 0.0001f) continue; 		// Skip negligible contributions
-				sample_alpha = min(sample_alpha, 1.0f - T); // Clamp to remaining transmittance
+				// Compute alpha
+				float alpha = min(expf(power) * con_o.w * dt, 0.99f);
+				if (alpha < 1.0f / 255.0f) continue;
 
-				for (int ch = 0; ch < CHANNELS; ch++) {
-					accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * sample_alpha * T;
+				// Update transmittance
+				float test_T = T * (1 - alpha);
+				if (test_T < 0.0001f) {
+					done = true;
+					continue;
 				}
 
-				T *= (1.0f - sample_alpha); // Update remaining transmittance
-				if (T < 0.01f) break; 		// Early termination if opaque
+				// Accumulate color
+				for (int ch = 0; ch < CHANNELS; ch++) {
+					accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * alpha * T;
+				}
+
+				T = test_T;	// Update transmittance
 			}
 		}
     }
@@ -723,7 +750,7 @@ __global__ void composing_3D(
 	__syncthreads();
     int pix_id = y * W + x;
     for (int ch = 0; ch < CHANNELS; ch++) {
-        out_color[pix_id * CHANNELS + ch] = accumulated_color[ch] + bg_color[ch] * T;
+        out_color[ch * H * W + pix_id] = accumulated_color[ch] + bg_color[ch] * T;
     }
 }
 
