@@ -186,6 +186,41 @@ __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 r
 	cov3D[5] = Sigma[2][2];
 }
 
+// Compute the inserve 3D covariance matrix
+__device__ void computeInvCov3D(const float* cov3D, float* invCov3D) {
+	// Extract the elements of Sigma from cov3D (upper triangular form)
+	glm::mat3 Sigma;
+    Sigma[0][0] = cov3D[0];  // Row 0, Col 0
+    Sigma[0][1] = cov3D[1];  // Row 0, Col 1
+    Sigma[0][2] = cov3D[2];  // Row 0, Col 2
+    Sigma[1][0] = cov3D[1];  // Row 1, Col 0
+    Sigma[1][1] = cov3D[3];  // Row 1, Col 1
+    Sigma[1][2] = cov3D[4];  // Row 1, Col 2
+    Sigma[2][0] = cov3D[2];  // Row 2, Col 0
+    Sigma[2][1] = cov3D[4];  // Row 2, Col 1
+    Sigma[2][2] = cov3D[5];  // Row 2, Col 2
+
+	// Add small perturbation to diagonal elements to handle near-singular cases
+    float epsilon = 1e-6;
+    Sigma[0][0] += epsilon;
+    Sigma[1][1] += epsilon;
+    Sigma[2][2] += epsilon;
+
+	// Compute determinant
+    float det = Sigma[0][0] * (Sigma[1][1] * Sigma[2][2] - Sigma[1][2] * Sigma[1][2]) -
+                Sigma[0][1] * (Sigma[0][1] * Sigma[2][2] - Sigma[1][2] * Sigma[0][2]) +
+                Sigma[0][2] * (Sigma[0][1] * Sigma[1][2] - Sigma[1][1] * Sigma[0][2]);
+	
+	// Inverse 3D covariance matrix
+	float invDet = 1.0 / det;
+	invCov3D[0] = invDet * (Sigma[1][1] * Sigma[2][2] - Sigma[1][2] * Sigma[1][2]);
+	invCov3D[1] = invDet * (Sigma[0][2] * Sigma[1][2] - Sigma[0][1] * Sigma[2][2]);
+	invCov3D[2] = invDet * (Sigma[0][1] * Sigma[1][2] - Sigma[0][2] * Sigma[1][1]);
+	invCov3D[3] = invDet * (Sigma[0][0] * Sigma[2][2] - Sigma[0][2] * Sigma[0][2]);
+	invCov3D[4] = invDet * (Sigma[0][2] * Sigma[0][1] - Sigma[0][0] * Sigma[1][2]);
+	invCov3D[5] = invDet * (Sigma[0][0] * Sigma[1][1] - Sigma[0][1] * Sigma[0][1]);
+}
+
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
 __global__ void preprocessCUDA(int P, int D, int M,
@@ -208,6 +243,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float2* points_xy_image,
 	float* depths,
 	float* cov3Ds,
+	// float* invCov3D,
 	float* rgb,
 	float4* conic_opacity,
 	const dim3 grid,
@@ -242,10 +278,12 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	if (cov3D_precomp != nullptr)
 	{
 		cov3D = cov3D_precomp + idx * 6;
+		// computeInvCov3D(cov3D_precomp + idx * 6, invCov3D + idx * 6);
 	}
 	else
 	{
 		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
+		// computeInvCov3D(cov3Ds + idx * 6, invCov3D + idx * 6);
 		cov3D = cov3Ds + idx * 6;
 	}
 
@@ -585,7 +623,7 @@ __global__ void composing_3D(
 	int *d_gaussians,
     int *n_gaussians,
     float3 *mean3D,
-    float *cov3D,
+    float *invCov,
     const float *bg_color,
     const float* colors_precomp,
     float4* conic_opacity,
@@ -598,7 +636,12 @@ __global__ void composing_3D(
     int y = pixel_id / W;
 
     int N_GAUSSIANS = n_gaussians[pixel_id];
-    if (N_GAUSSIANS == 0) return;  // Skip processing if no Gaussians
+    if (N_GAUSSIANS == 0) return;
+
+	// Allocate memory
+	float t_near[1024];
+	float t_far[1024];
+	int gaussians[1024];
 
 	// Compute camera frustrum and pixel coordinates in view space
     float right = tanfovx * 1.0;
@@ -611,11 +654,6 @@ __global__ void composing_3D(
 	float3 pixel_w = transformPoint4x3(pixel_v, viewmatrix_inv);
     glm::vec3 ray_origin = glm::vec3(cam_pos[0], cam_pos[1], cam_pos[2]);
     glm::vec3 ray_direction = glm::normalize(glm::vec3(pixel_w.x, pixel_w.y, pixel_w.z) - ray_origin);
-
-	// Allocate memory
-	float t_near[1024];
-	float t_far[1024];
-	int gaussians[1024];
 
 	// Compute intersections
 	for (int i = 0; i < N_GAUSSIANS; i++) {
@@ -651,100 +689,72 @@ __global__ void composing_3D(
 	auto last = first + N_GAUSSIANS;
 	thrust::sort_by_key(thrust::seq, dev_t_near, dev_t_near + N_GAUSSIANS, first);
 
-	// Compose
+	// Initialize transmittance and color
 	__syncthreads();
 	float accumulated_color[CHANNELS] = {0.0f};
-    float T = 1.0f;  // Full transmittance initially
+	const float segment_length = 0.005f;
+	const int considered_range = 3;
 	bool done = false;
+    float T = 1.0f;  	// Full transmittance initially
+	float t_curr = 0.0f;// Current t along the ray
+
+	// Compose gaussians along the ray
     for (int i = 0; !done && i < N_GAUSSIANS; i++) {
         int idx = gaussians[i];
-        float3 gaussian_mean = mean3D[idx];
-        float covariance = cov3D[idx];
-        float4 con_o = conic_opacity[idx];
+		t_curr = max(t_curr, t_near[i]);
+        
+		// Compute each in the gaussian
+		while (t_curr < t_far[i]){
+			// Check overlapping gaussians on the point
+			int overlap_start = max(0, i - considered_range);
+			int overlap_end = min(N_GAUSSIANS, i + considered_range);
 
-        // Ray-Gaussian intersection bounds
-        float t_start = t_near[i];
-        float t_end = t_far[i];
-        if (t_start >= t_end) continue;
+			// Collect influence of all overlapping gaussians
 
-		// Discretization steps
-        float dt = (t_end - t_start) / 3.0f;
-
-		// Directly use mean point if dt too small 
-		if (dt < 0.0001f) {
-			float t_curr = (t_start + t_end) / 2.0f;
-
-			float3 sample_point;
-			sample_point.x = ray_origin.x + t_curr * ray_direction.x;
-			sample_point.y = ray_origin.y + t_curr * ray_direction.y;
-			sample_point.z = ray_origin.z + t_curr * ray_direction.z;
-
-			float3 diff;
-			diff.x = gaussian_mean.x - sample_point.x;
-			diff.y = gaussian_mean.y - sample_point.y;
-			diff.z = gaussian_mean.z - sample_point.z;
-
-			// Compute power using conic matrix
-			float distance2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
-			float power = -0.5f * distance2 / covariance;
-			if (power > 0.0f) continue;
-
-			// Compute alpha
-			float alpha = min(expf(power) * con_o.w, 0.99f);
-			if (alpha < 1.0f / 255.0f) continue;
-			
-			// Update transmittance
-			float test_T = T * (1 - alpha);
-			if (test_T < 0.0001f) {
-				done = true;
-				continue;
-			}
-
-			// Accumulate color
-			for (int ch = 0; ch < CHANNELS; ch++) {
-				accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * alpha * T;
-			}
-
-			T = test_T;	// Update transmittance
-		} 
-		// Else march along the ray within the bounds of the current Gaussian
-		else {
-			// printf("i %d, dt = %f\n", i, dt);
-			for (float t_curr = t_start; t_curr <= t_end; t_curr += dt) {
-				float3 sample_point;
-				sample_point.x = ray_origin.x + t_curr * ray_direction.x;
-				sample_point.y = ray_origin.y + t_curr * ray_direction.y;
-				sample_point.z = ray_origin.z + t_curr * ray_direction.z;
-
-				float3 diff;
-				diff.x = sample_point.x - gaussian_mean.x;
-				diff.y = sample_point.y - gaussian_mean.y;
-				diff.z = sample_point.z - gaussian_mean.z;
-
-				// Compute power using conic matrix
-				float distance2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
-				float power = -0.5f * distance2 / covariance;
-				if (power > 0.0f) continue;
-
-				// Compute alpha
-				float alpha = min(expf(power) * con_o.w * dt, 0.99f);
-				if (alpha < 1.0f / 255.0f) continue;
-
-				// Update transmittance
-				float test_T = T * (1 - alpha);
-				if (test_T < 0.0001f) {
-					done = true;
-					continue;
-				}
-
-				// Accumulate color
-				for (int ch = 0; ch < CHANNELS; ch++) {
-					accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * alpha * T;
-				}
-
-				T = test_T;	// Update transmittance
-			}
+			t_curr += segment_length;
 		}
+
+		// float3 gaussian_mean = mean3D[idx];
+        // float opacity = conic_opacity[idx].w;
+
+		// // Approximate intersection bounds
+		// float t_mid = (t_near[i] + t_far[i]) / 2.0f;
+		// float3 sample_point = {
+		// 	ray_origin.x + t_mid * ray_direction.x,
+		// 	ray_origin.y + t_mid * ray_direction.y,
+		// 	ray_origin.z + t_mid * ray_direction.z
+		// };
+
+		// // Compute power using mahalanobis distance
+		// float3 diff = {
+		// 	gaussian_mean.x - sample_point.x,
+		// 	gaussian_mean.y - sample_point.y,
+		// 	gaussian_mean.z - sample_point.z
+		// };
+		// float mahalanobis_distance_squared = 
+		// 	diff.x * (diff.x * invCov[idx * 6 + 0] + diff.y * invCov[idx * 6 + 1] + diff.z * invCov[idx * 6 + 2]) +
+		// 	diff.y * (diff.x * invCov[idx * 6 + 1] + diff.y * invCov[idx * 6 + 3] + diff.z * invCov[idx * 6 + 4]) +
+		// 	diff.z * (diff.x * invCov[idx * 6 + 2] + diff.y * invCov[idx * 6 + 4] + diff.z * invCov[idx * 6 + 5]);
+		// float power = -0.5f * mahalanobis_distance_squared;
+		// if (power > 0.0f) continue;
+
+		// // Compute alpha
+		// float sample_alpha = min(expf(power) * opacity, 0.99f);
+		// if (sample_alpha < 1.0f / 255.0f) continue;
+
+		// // Update transmittance
+		// float test_T = T * (1 - sample_alpha);
+		// if (test_T < 0.0001f) {
+		// 	done = true;
+		// 	break;
+		// }
+
+		// // Accumulate color
+		// for (int ch = 0; ch < CHANNELS; ch++) {
+		// 	accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * sample_alpha * T;
+		// }
+
+		// T = test_T;	// Update transmittance
     }
 
 	__syncthreads();
