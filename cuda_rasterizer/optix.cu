@@ -134,15 +134,6 @@ extern "C" __global__ void __raygen__rg() {
     for (int i = 0; i < num; i++) {
         ((int *)params.gaussians)[i * params.width * params.height + pixel_id] = gaussians[i];
     }
-
-    //     optixDirectCall<int, int, int *, int *>(0, num, &((int *)params.n_gaussians)[pixel_id * 1024], gaussians);
-}
-
-extern "C" __device__ void __direct_callable__dc(int n, int *destination, int *source)
-{
-    for (int i = 0; i < n; i++) {
-        destination[i] = source[i];
-    }
 }
 
 extern "C" __global__ void __anyhit__ah() {

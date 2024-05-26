@@ -219,12 +219,16 @@ int CudaRasterizer::Rasterizer::forward(
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
 	// Information for ray tracer
+	const int BVH_N,
+	const int* bvh_nodes,
+	const float* bvh_aabbs,
 	float* aabbs,
 	float* out_color,
 	int* radii,
-	bool debug)
+	bool debug,
+	int method,
+	float *benchmark)
 {
-	auto start = std::chrono::high_resolution_clock::now();
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
@@ -278,89 +282,96 @@ int CudaRasterizer::Rasterizer::forward(
 		prefiltered
 	), debug)
 
-	CHECK_CUDA(FORWARD::ray_render(
-		P, width, height,
-		// information needed by ray tracer
-		znear, zfar,
-		viewmatrix,
-		viewmatrix_inv,
-		projmatrix,
-		tan_fovx,
-		tan_fovy,
-		(glm::vec3*)cam_pos,
-		(float *)aabbs,
-		// information used to compute 2d projection color
-		(float *)means3D,
-		geomState.means2D,
-		background,
-		geomState.depths,
-		(colors_precomp != nullptr ? colors_precomp : geomState.rgb),
-		geomState.conic_opacity,
-		// outputs
-		out_color
-	), debug)
-
+	auto start = std::chrono::high_resolution_clock::now();
 	int num_rendered = 0; // fixme: what is this for?
 
-	// // Compute prefix sum over full list of touched tile counts by Gaussians
-	// // E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
-	// CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
+	if (method == 1 || method == 2) {
+		CHECK_CUDA(FORWARD::ray_render(
+			P, width, height,
+			// information needed by ray tracer
+			znear, zfar,
+			viewmatrix,
+			viewmatrix_inv,
+			projmatrix,
+			tan_fovx,
+			tan_fovy,
+			(glm::vec3*)cam_pos,
+			BVH_N,
+			(const struct bvh_node *)bvh_nodes,
+			(const struct bvh_aabb *)bvh_aabbs,
+			(float *)aabbs,
+			// information used to compute 2d projection color
+			(float *)means3D,
+			geomState.means2D,
+			background,
+			geomState.depths,
+			(colors_precomp != nullptr ? colors_precomp : geomState.rgb),
+			geomState.conic_opacity,
+			// outputs
+			out_color,
+			method,
+			benchmark
+		), debug)
+	} else {
+		// Compute prefix sum over full list of touched tile counts by Gaussians
+		// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
+		CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
 
-	// // Retrieve total number of Gaussian instances to launch and resize aux buffers
-	// int num_rendered;
-	// CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
+		// Retrieve total number of Gaussian instances to launch and resize aux buffers
+		CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
 
-	// size_t binning_chunk_size = required<BinningState>(num_rendered);
-	// char* binning_chunkptr = binningBuffer(binning_chunk_size);
-	// BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
+		size_t binning_chunk_size = required<BinningState>(num_rendered);
+		char* binning_chunkptr = binningBuffer(binning_chunk_size);
+		BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
 
-	// // For each instance to be rendered, produce adequate [ tile | depth ] key 
-	// // and corresponding dublicated Gaussian indices to be sorted
-	// duplicateWithKeys << <(P + 255) / 256, 256 >> > (
-	// 	P,
-	// 	geomState.means2D,
-	// 	geomState.depths,
-	// 	geomState.point_offsets,
-	// 	binningState.point_list_keys_unsorted,
-	// 	binningState.point_list_unsorted,
-	// 	radii,
-	// 	tile_grid)
-	// CHECK_CUDA(, debug)
+		// For each instance to be rendered, produce adequate [ tile | depth ] key 
+		// and corresponding dublicated Gaussian indices to be sorted
+		duplicateWithKeys << <(P + 255) / 256, 256 >> > (
+			P,
+			geomState.means2D,
+			geomState.depths,
+			geomState.point_offsets,
+			binningState.point_list_keys_unsorted,
+			binningState.point_list_unsorted,
+			radii,
+			tile_grid)
+		CHECK_CUDA(, debug)
 
-	// int bit = getHigherMsb(tile_grid.x * tile_grid.y);
+		int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
-	// // Sort complete list of (duplicated) Gaussian indices by keys
-	// CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
-	// 	binningState.list_sorting_space,
-	// 	binningState.sorting_size,
-	// 	binningState.point_list_keys_unsorted, binningState.point_list_keys,
-	// 	binningState.point_list_unsorted, binningState.point_list,
-	// 	num_rendered, 0, 32 + bit), debug)
+		// Sort complete list of (duplicated) Gaussian indices by keys
+		CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
+			binningState.list_sorting_space,
+			binningState.sorting_size,
+			binningState.point_list_keys_unsorted, binningState.point_list_keys,
+			binningState.point_list_unsorted, binningState.point_list,
+			num_rendered, 0, 32 + bit), debug)
 
-	// CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
+		CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
 
-	// // Identify start and end of per-tile workloads in sorted list
-	// if (num_rendered > 0)
-	// 	identifyTileRanges << <(num_rendered + 255) / 256, 256 >> > (
-	// 		num_rendered,
-	// 		binningState.point_list_keys,
-	// 		imgState.ranges);
-	// CHECK_CUDA(, debug)
+		// Identify start and end of per-tile workloads in sorted list
+		if (num_rendered > 0)
+			identifyTileRanges << <(num_rendered + 255) / 256, 256 >> > (
+				num_rendered,
+				binningState.point_list_keys,
+				imgState.ranges);
+		CHECK_CUDA(, debug)
 
-	// // Let each tile blend its range of Gaussians independently in parallel
-	// const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
-	// CHECK_CUDA(FORWARD::render(
-	// 	tile_grid, block,
-	// 	imgState.ranges,
-	// 	binningState.point_list,
-	// 	width, height,
-	// 	geomState.means2D,
-	// 	feature_ptr,
-	// 	geomState.conic_opacity,
-	// 	imgState.accum_alpha,
-	// 	imgState.n_contrib,
-	// 	background,
-	// 	out_color), debug)
+		// Let each tile blend its range of Gaussians independently in parallel
+		const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
+		CHECK_CUDA(FORWARD::render(
+			tile_grid, block,
+			imgState.ranges,
+			binningState.point_list,
+			width, height,
+			geomState.means2D,
+			feature_ptr,
+			geomState.conic_opacity,
+			imgState.accum_alpha,
+			imgState.n_contrib,
+			background,
+			out_color), debug)
+	}
 
 	cudaError_t cuda_err;
 	cuda_err = cudaDeviceSynchronize(); // Wait for kernel to finish and check for errors
@@ -368,9 +379,12 @@ int CudaRasterizer::Rasterizer::forward(
 	    printf("cudaDeviceSynchronize failed: %s\n", cudaGetErrorString(cuda_err));
 	    // Handle the error appropriately, maybe exit the program or return an error code
 	}
+
 	auto end = std::chrono::high_resolution_clock::now();
 	std::chrono::duration<double> duration = end - start;
 	printf("Total time took: %lf second\n", duration.count());
+
+	benchmark[0] = duration.count();
 
 	return num_rendered;
 }

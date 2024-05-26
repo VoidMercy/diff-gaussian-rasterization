@@ -75,6 +75,9 @@ namespace FORWARD
 		const float tanfovx,
 		const float tanfovy,
 		const glm::vec3* cam_pos,
+		const int BVH_N,
+		const struct bvh_node* bvh_nodes,
+		const struct bvh_aabb* bvh_aabbs,
 		float *aabbs,
 		// Information used to compute 2D projection color
 		float* means3D,
@@ -84,7 +87,9 @@ namespace FORWARD
 		const float* colors_precomp,
 		float4* conic_opacity,
 		// Output
-		float* out_color);
+		float* out_color,
+		int method,
+		float *benchmark);
 }
 
 

@@ -473,11 +473,6 @@ struct HitGroupData
 	float *depths;
 };
 
-struct CallablesData
-{
-    // No data needed
-};
-
 template <typename T>
 struct SbtRecord
 {
@@ -488,7 +483,6 @@ struct SbtRecord
 typedef SbtRecord<RayGenData>     RayGenRecord;
 typedef SbtRecord<MissData>       MissRecord;
 typedef SbtRecord<HitGroupData>   HitGroupRecord;
-typedef SbtRecord<CallablesData>  CallablesRecord;
 
 struct Params
 {
@@ -752,9 +746,10 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 									const float *bg_color,
 									const float* colors_precomp,
 									float4 *conic_opacity,
-									float *out_color) {
+									float *out_color,
+									float *benchmark) {
 	auto start = std::chrono::high_resolution_clock::now();
-	printf("Building Optix BVH\n");
+	// printf("Building Optix BVH\n");
 
 	// Create cuda stream
 	cudaStream_t cuStream;
@@ -764,7 +759,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	OPTIX_CHECK( optixInit() );
     OptixDeviceContextOptions options = {};
     options.logCallbackFunction = &context_log_cb;
-    options.logCallbackLevel = 4;
+    options.logCallbackLevel = 0;
 	OptixDeviceContext optixContext;
 	cudaFree(0);
 	CUcontext cuCtx = 0;
@@ -813,13 +808,12 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
         &ptx_module
     ) );
 
-    printf("Module compile %d: %s", logStringSize, logString);
+    // printf("Module compile %d: %s", logStringSize, logString);
 
 	// Then create program groups
     OptixProgramGroup raygen_prog_group;
     OptixProgramGroup hit_prog_group;
     OptixProgramGroup miss_prog_group;
-    OptixProgramGroup callables_prog_group;
 
     OptixProgramGroupOptions  program_group_options = {};
 
@@ -840,7 +834,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
         ) );
     }
 
-    printf("Raygen Program Group %d: %s", logStringSize, logString);
+    // printf("Raygen Program Group %d: %s", logStringSize, logString);
 
     {
         // OptixBuiltinISOptions builtin_is_options = {};
@@ -870,7 +864,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
         ) );
     }
 
-    printf("Hit Program Group %d: %s", logStringSize, logString);
+    // printf("Hit Program Group %d: %s", logStringSize, logString);
 
     {
         OptixProgramGroupDesc miss_prog_group_desc = {};
@@ -888,25 +882,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
         ) );
     }
 
-    printf("Miss Program Group %d: %s", logStringSize, logString);
-
-    {
-        OptixProgramGroupDesc callables_prog_group_desc = {};
-        callables_prog_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
-        callables_prog_group_desc.callables.moduleDC = ptx_module;
-        callables_prog_group_desc.callables.entryFunctionNameDC = "__direct_callable__dc";
-		logStringSize = 1024;
-		logString[0] = 0;
-        OPTIX_CHECK( optixProgramGroupCreate(
-            optixContext, &callables_prog_group_desc,
-            1,  // num program groups
-            &program_group_options,
-            logString, &logStringSize,
-            &callables_prog_group
-        ) );
-    }
-
-    printf("Callables Group %d: %s", logStringSize, logString);
+    // printf("Miss Program Group %d: %s", logStringSize, logString);
 
 	// Finally create pipeline
 	OptixPipeline pipeline;
@@ -933,9 +909,9 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
         &pipeline
     );
 
-    printf("Pipeline %d: ", logStringSize);
-    std::cout.write(logString, logStringSize);
-    printf("\n");
+    // printf("Pipeline %d: ", logStringSize);
+    // std::cout.write(logString, logStringSize);
+    // printf("\n");
 
     // We need to specify the max traversal depth.  Calculate the stack sizes, so we can specify all
     // parameters to optixPipelineSetStackSize.
@@ -984,21 +960,6 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 
 	memset( &buildInputs[0], 0, sizeof( OptixBuildInput ) );
 
-	// CUdeviceptr d_vertices;
-	// CUdeviceptr d_radii;
-	// CHECK_CUDA(cudaMalloc((void **)&d_vertices, sizeof(float3) * P), true);
-	// CHECK_CUDA(cudaMalloc((void **)&d_radii, sizeof(float) * P), true);
-	// CHECK_CUDA(cudaMemcpy((void *)d_vertices, vertices, sizeof(float3) * P, cudaMemcpyHostToDevice), true);
-	// CHECK_CUDA(cudaMemcpy((void *)d_radii, radii, sizeof(float) * P, cudaMemcpyHostToDevice), true);
-
-	// float a[12];
-	// CHECK_CUDA(cudaMemcpy((void *)a, (void *)d_aabbBuffer, sizeof(float) * 12, cudaMemcpyDeviceToHost), true);
-	// for (int i = 0; i < 12; i++) {
-	// 	printf("%f \n", a[i]);
-	// }
-
-	// CUdeviceptr d_vertices = (CUdeviceptr)vertices;
-	// CUdeviceptr d_radii = (CUdeviceptr)radii;
 	CUdeviceptr d_aabbs = (CUdeviceptr)d_aabbBuffer;
 
 	// Setup primitives
@@ -1006,12 +967,6 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	OptixBuildInputCustomPrimitiveArray& buildInput = buildInputs[0].customPrimitiveArray;
 	buildInput.aabbBuffers = &d_aabbs;
 	buildInput.numPrimitives = P;
-	// buildInput.vertexBuffers = &d_vertices;
-	// buildInput.vertexStrideInBytes = 0; // Default stride is sizeof(float3)
-	// buildInput.numVertices = P;
-	// buildInput.radiusBuffers = &d_radii;
-	// buildInput.radiusStrideInBytes = 0; // Default stride is sizeof(float)
-	// buildInput.singleRadius = 0;
 
 	unsigned int flags[1] = {OPTIX_GEOMETRY_FLAG_NONE};
 	buildInput.flags = flags;
@@ -1021,7 +976,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	buildInput.sbtIndexOffsetStrideInBytes = 0;
 	buildInput.primitiveIndexOffset = 0;
 
-	printf("Compute accel memory usage\n");
+	// printf("Compute accel memory usage\n");
 
 	OptixAccelBufferSizes bufferSizes = {};
 	OPTIX_CHECK( optixAccelComputeMemoryUsage( optixContext, &accelOptions,
@@ -1030,13 +985,13 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	CUdeviceptr d_output;
 	CUdeviceptr d_temp;
 
-	printf("Output size in bytes %d\n", bufferSizes.outputSizeInBytes);
-	printf("Temp size in bytes %d\n", bufferSizes.tempSizeInBytes);
+	// printf("Output size in bytes %d\n", bufferSizes.outputSizeInBytes);
+	// printf("Temp size in bytes %d\n", bufferSizes.tempSizeInBytes);
 
 	cudaMalloc( (void **)&d_output, bufferSizes.outputSizeInBytes );
 	cudaMalloc( (void **)&d_temp, bufferSizes.tempSizeInBytes );
 
-	printf("Building acceleration structure\n");
+	// printf("Building acceleration structure\n");
 
 	OptixTraversableHandle outputHandle = 0;
 	OPTIX_CHECK( optixAccelBuild( optixContext, cuStream,
@@ -1091,20 +1046,6 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
         cudaMemcpyHostToDevice
     ), true);
 
-    CUdeviceptr  d_callablegroup_records;
-    const size_t callablegroup_record_size = sizeof( CallablesRecord );
-    CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_callablegroup_records ), callablegroup_record_size ), true);
-
-    CallablesRecord ca_sbt = {};
-    OPTIX_CHECK( optixSbtRecordPackHeader( callables_prog_group, &ca_sbt ) );
-
-    CHECK_CUDA(cudaMemcpy(
-        reinterpret_cast< void* >( d_callablegroup_records ),
-        &ca_sbt,
-        callablegroup_record_size,
-        cudaMemcpyHostToDevice
-    ), true);
-
     sbt.raygenRecord = d_raygen_record;
     sbt.hitgroupRecordBase = d_hitgroup_records;
     sbt.hitgroupRecordStrideInBytes = sizeof( HitGroupRecord );
@@ -1112,14 +1053,12 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
     sbt.missRecordBase = d_missgroup_records;
     sbt.missRecordStrideInBytes = sizeof( MissRecord );
     sbt.missRecordCount = 1;
-    sbt.callablesRecordBase = d_callablegroup_records;
-    sbt.callablesRecordStrideInBytes = sizeof( CallablesRecord );
-    sbt.callablesRecordCount = 1;
 
-	printf("Optix BVH done\n");
+	// printf("Optix BVH done\n");
 	auto end = std::chrono::high_resolution_clock::now();
 	std::chrono::duration<double> duration = end - start;
 	printf("Optix BVH time taken %lf seconds\n", duration.count());
+	benchmark[3] = duration.count();
 
     // Now we launch ray tracing!
 	CUdeviceptr d_pipelineParams;
@@ -1128,6 +1067,8 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 
 	CUdeviceptr gaussians;
 	CUdeviceptr n_gaussians;
+	CUdeviceptr d_viewmatrix_inv;
+	CUdeviceptr d_cam_pos;
 
 	// Set-up params on CPU side
 	CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &gaussians ), W*H*sizeof(int)*1024 ), true);
@@ -1140,18 +1081,20 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	p.height = H;
 	p.tanfovx = tanfovx;
 	p.tanfovy = tanfovy;
-	CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &p.viewmatrix_inv ), 16*sizeof(float) ), true);
-	CHECK_CUDA(cudaMemcpy( (void *)p.viewmatrix_inv, (void *)viewmatrix_inv, 16*sizeof(float), cudaMemcpyHostToDevice), true);
+	CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_viewmatrix_inv ), 16*sizeof(float) ), true);
+	CHECK_CUDA(cudaMemcpy( (void *)d_viewmatrix_inv, (void *)viewmatrix_inv, 16*sizeof(float), cudaMemcpyHostToDevice), true);
 	p.viewmatrix_inv = viewmatrix_inv;
-	CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &p.cam_pos ), 3*sizeof(float) ), true);
-	CHECK_CUDA(cudaMemcpy( (void *)p.cam_pos, (void *)cam_pos, 3*sizeof(float), cudaMemcpyHostToDevice), true);
+	CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_cam_pos ), 3*sizeof(float) ), true);
+	CHECK_CUDA(cudaMemcpy( (void *)d_cam_pos, (void *)cam_pos, 3*sizeof(float), cudaMemcpyHostToDevice), true);
+	p.viewmatrix_inv = (float *)d_viewmatrix_inv;
+	p.cam_pos = (float *)d_cam_pos;
 	p.handle = outputHandle;
 	p.depths = depths;
 
 	CHECK_CUDA(cudaMalloc(reinterpret_cast< void** >( &d_pipelineParams ), sizeof(Params)), true);
 	CHECK_CUDA(cudaMemcpy(reinterpret_cast<void*>(d_pipelineParams), &p, sizeof(Params), cudaMemcpyHostToDevice), true);
 
-	printf("Launching!\n");
+	// printf("Launching!\n");
 
 	start = std::chrono::high_resolution_clock::now();
 
@@ -1166,93 +1109,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
     end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
 	printf("Ray tracing took %lf seconds\n", duration.count());
-
-	// int *test_n = (int *)malloc(5 * sizeof(int));
-	// CHECK_CUDA(cudaMemcpy((void *)test_n, (void *)n_gaussians, 5*sizeof(int), cudaMemcpyDeviceToHost), true);
-	// for (int i = 0; i < 5; i++) {
-	// 	printf("N %d %d\n", i, test_n[i]);
-	// }
-	// return;
-
-	// Radix sort
-	// start = std::chrono::high_resolution_clock::now();
-
-	// int *prefix_sum;
-	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &prefix_sum ), W*H*sizeof(int) ), true);
-	// size_t temp_storage_bytes;
-
-	// CHECK_CUDA((cub::DeviceScan::InclusiveSum<int *, int *>(nullptr, temp_storage_bytes, (int *)n_gaussians, prefix_sum, W*H)), true);
-	// CUdeviceptr d_temp_storage;
-	// printf("Bytes %ld\n", temp_storage_bytes);
-	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_temp_storage ), temp_storage_bytes ), true);
-	// CHECK_CUDA((cub::DeviceScan::InclusiveSum<int *, int *>((void *)d_temp_storage, temp_storage_bytes, (int *)n_gaussians, prefix_sum, W*H)), true);
-
-	// int num_rendered;
-	// CHECK_CUDA(cudaMemcpy(&num_rendered, &prefix_sum[W*H - 1], sizeof(int), cudaMemcpyDeviceToHost), true);
-	// printf("Num rendered: %d\n", num_rendered);
-
-	// uint64_t *d_keys, *d_keys_out;
-	// int *d_values, *d_values_out;
-	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_keys ), num_rendered*sizeof(uint64_t) ), true);
-	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_values ), num_rendered*sizeof(int) ), true);
-	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_keys_out ), num_rendered*sizeof(uint64_t) ), true);
-	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_values_out ), num_rendered*sizeof(int) ), true);
-
-	// int num_blocks = (W * H + COLLECT_THREADS - 1) / COLLECT_THREADS;
-	// // Collect keys and values
-	// collect_keys<<<num_blocks, COLLECT_THREADS>>>(W, H, num_rendered, prefix_sum, (int *)n_gaussians, (int *)gaussians, (float *)depths, (uint32_t *)d_keys, d_values);
-
-	// int bits = countMsb(W * H);
-
-	// // SortPairs
-	// CUdeviceptr d_temp_storage2;
-	// CHECK_CUDA((cub::DeviceRadixSort::SortPairs<uint64_t, int>(
-	// 	nullptr,
-	// 	temp_storage_bytes,
-	// 	(const uint64_t *)d_keys,
-	// 	d_keys_out,
-	// 	(const int *)d_values,
-	// 	d_values_out,
-	// 	num_rendered,
-	// 	0, 32 + bits
-	// )), true);
-
-	// printf("Bytes %ld\n", temp_storage_bytes);
-	// CHECK_CUDA(cudaMalloc( reinterpret_cast< void** >( &d_temp_storage2 ), temp_storage_bytes ), true);
-
-	// CHECK_CUDA((cub::DeviceRadixSort::SortPairs<uint64_t, int>(
-	// 	(void *)d_temp_storage2,
-	// 	temp_storage_bytes,
-	// 	(const uint64_t *)d_keys,
-	// 	d_keys_out,
-	// 	(const int *)d_values,
-	// 	d_values_out,
-	// 	num_rendered,
-	// 	0, 32 + bits
-	// )), true);
-
-	// // const int DEBUG_N = 1024*256;
-	// // int *test = (int *)malloc(DEBUG_N * sizeof(int));
-	// // uint64_t *test_keys = (uint64_t *)malloc(DEBUG_N * sizeof(uint64_t));
-	// // CHECK_CUDA(cudaMemcpy((void *)test, (void *)d_values, DEBUG_N*sizeof(int), cudaMemcpyDeviceToHost), true);
-	// // CHECK_CUDA(cudaMemcpy((void *)test_keys, (void *)d_keys_out, DEBUG_N*sizeof(uint64_t), cudaMemcpyDeviceToHost), true);
-	// // for (int i = 0; i < DEBUG_N; i++) {
-	// // 	if (test[i] >= P) {
-	// // 		printf("L: %d, %d %lld\n", i, test[i], test_keys[i]);
-	// // 	}
-	// // }
-
-
-	// // Compose
-	// printf("Now we compose\n");
-	// int threads_per_block = 16;
-	// int blocks = (W * H + threads_per_block - 1) / threads_per_block;
-	// composing<CHANNELS> <<<blocks, threads_per_block>>>(P, W, H, num_rendered, prefix_sum, (int *)p.n_gaussians, d_values, means2D, bg_color, colors_precomp, conic_opacity, out_color);
-
-	// cudaDeviceSynchronize();
-	// end = std::chrono::high_resolution_clock::now();
-	// duration = end - start;
-	// printf("Radix sort took %lf seconds\n", duration.count());
+	benchmark[1] = duration.count();
 
 	// Now we sort and alpha-compose
 	start = std::chrono::high_resolution_clock::now();
@@ -1263,10 +1120,275 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
 	printf("Alpha compose took %lf seconds\n", duration.count());
+	benchmark[2] = duration.count();
 
+    CHECK_CUDA(cudaFree((void *)d_output), true);
+    CHECK_CUDA(cudaFree((void *)d_temp), true);
+    CHECK_CUDA(cudaFree((void *)d_raygen_record), true);
+    CHECK_CUDA(cudaFree((void *)d_hitgroup_records), true);
+    CHECK_CUDA(cudaFree((void *)d_missgroup_records), true);
+    CHECK_CUDA(cudaFree((void *)gaussians), true);
+    CHECK_CUDA(cudaFree((void *)n_gaussians), true);
+    CHECK_CUDA(cudaFree((void *)d_viewmatrix_inv), true);
+    CHECK_CUDA(cudaFree((void *)d_cam_pos), true);
+    CHECK_CUDA(cudaFree((void *)d_pipelineParams), true);
     CHECK_CUDA(cudaStreamDestroy(cuStream), true);
-
+    OPTIX_CHECK(optixModuleDestroy(ptx_module));
+    OPTIX_CHECK(optixPipelineDestroy(pipeline));
+    OPTIX_CHECK(optixDeviceContextDestroy(optixContext));
 }
+
+struct HitInfo {
+	 bool hit;
+	 float t_near;
+	 float t_far;
+	 int obj_idx;
+};
+
+__device__ struct HitInfo ray_bbox_intersect(
+    glm::vec3 ray_pos,
+    glm::vec3 ray_dir_inv,
+	const struct bvh_aabb* bvh_aabbs,
+	int bvh_idx,
+    float bound_near,
+    float bound_far
+) {
+    glm::vec3 bbox_min(bvh_aabbs[bvh_idx].x_min, bvh_aabbs[bvh_idx].y_min, bvh_aabbs[bvh_idx].z_min);
+    glm::vec3 bbox_max(bvh_aabbs[bvh_idx].x_max, bvh_aabbs[bvh_idx].y_max, bvh_aabbs[bvh_idx].z_max);
+
+	struct HitInfo h;
+	h.t_near = FLT_MAX;
+	h.obj_idx = bvh_idx;
+
+    glm::vec3 t_min = (bbox_min - ray_pos) * ray_dir_inv;
+    glm::vec3 t_max = (bbox_max - ray_pos) * ray_dir_inv;
+
+    glm::vec3 t1 = glm::min(t_min, t_max);
+    glm::vec3 t2 = glm::max(t_min, t_max);
+
+    float t_near = fmaxf(fmaxf(t1.x, t1.y), t1.z);
+    float t_far = fminf(fminf(t2.x, t2.y), t2.z);
+    h.t_near = t_near;
+    h.t_far = t_far;
+
+    h.hit = !((t_far < 0) || (t_near > t_far) || (t_far < bound_near) || (t_near > bound_far));
+    return h;
+}
+
+struct stack_entry {
+	int idx;
+	float t_near;
+	float t_far;
+};
+
+template <uint32_t CHANNELS>
+__device__ void ray_render_composing (
+    // The coordinate of the current point being computed
+    int x,
+    int y,
+    const int H, // height of image
+    const int W, // width of image
+    // Array of 2D gaussians
+    const int N_GAUSSIANS,   	// number of Gaussians
+    int *gaussians,          	// index array of Gaussians; should be sorted by depth
+    float *depths,            	// depths to sort the Gaussians
+    float2 *mean2D,          	// mean which is where it's located in 2D space
+    const float *bg_color,      // color of background
+    const float* colors_precomp,// computed color 
+    float4* conic_opacity,   	// opacity
+    float *out_color            // output color
+) {
+	float accumulated_color[CHANNELS] = { 0.0f };
+	float T = 1.0f;  // Start with full transmittance
+
+	// Sort the Gaussians by depth
+	__syncthreads();
+    thrust::sort_by_key(thrust::seq, depths, depths + N_GAUSSIANS, gaussians);
+
+	__syncthreads();
+	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
+    for (int i = 0; i < N_GAUSSIANS; i++) {
+        int index = gaussians[i];
+        float4 con_o = conic_opacity[index];
+        float2 gaussian_mean = mean2D[index];
+
+        // Compute power using conic matrix
+        float2 d = {x - gaussian_mean.x, y - gaussian_mean.y};
+        float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+        if (power > 0.0f)
+            continue;
+
+        // Compute alpha
+        float alpha = min(exp(power) * con_o.w, 0.99f);
+        if (alpha < 1.0f / 255.0f)
+			continue;	// Skip if alpha is too small
+
+		// Update transmittance
+        float test_T = T * (1 - alpha);
+        if (test_T < 0.0001f)
+            break;  	// Stop if transmittance is negligible
+
+		// Accumulate color
+		for (int ch = 0; ch < CHANNELS; ch++) {
+			accumulated_color[ch] += colors_precomp[index * CHANNELS + ch] * alpha * T;
+		}
+
+        T = test_T;  	// Update the transmittance
+    }
+
+	__syncthreads();
+    int pix_id = y * W + x;
+    for (int ch = 0; ch < CHANNELS; ch++) {
+		out_color[ch * H * W + pix_id] = accumulated_color[ch] + bg_color[ch] * T;
+    }
+}
+
+template <uint32_t CHANNELS>
+__global__ void ray_render_cuda(
+	const int P,
+	const int W,
+	const int H,
+	// Information needed by ray tracer
+	const float znear,
+	const float zfar,
+	const float* viewmatrix,
+	const float* viewmatrix_inv,
+	const float* projmatrix,
+	const float tanfovx,
+	const float tanfovy,
+	const glm::vec3* cam_pos,
+	const int BVH_N,
+	const struct bvh_node* bvh_nodes,
+	const struct bvh_aabb* bvh_aabbs,
+	// Information used to compute 2D projection color
+	float2* means2D,
+	const float* bg_color,
+	float *depths,
+	const float* colors_precomp,
+	float4* conic_opacity,
+	// Output
+	float* out_color
+) {
+	int pixel_x_coord = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixel_y_coord = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (pixel_x_coord >= W || pixel_y_coord >= H) {
+    	return;
+    }
+
+	// Compute camera frustrum and pixel coordinates in view space
+	float top = tanfovy * 1.0;
+	float right = tanfovx * 1.0;
+
+	float pixel_view_x = right * 2.0 * ((float)(pixel_x_coord + 0.5) / (float)W) - right;
+	float pixel_view_y = top * 2.0 * ((float)(pixel_y_coord + 0.5) / (float)H) - top;
+	float3 pixel_v = { pixel_view_x, pixel_view_y, 1.0 };
+	float3 pixel_w = transformPoint4x3(pixel_v, viewmatrix_inv);
+	glm::vec3 pixel_w_vec(pixel_w.x, pixel_w.y, pixel_w.z);
+
+	// Cast a ray from cam_pos to pixel_w (in world space), and ray trace!
+	glm::vec3 ray_pos = *cam_pos;
+	glm::vec3 ray_dir = glm::normalize(pixel_w_vec - ray_pos);
+	glm::vec3 ray_dir_inv = glm::vec3(1.0f) / ray_dir;
+
+	// printf("Camera position %f %f %f\n", ray_pos.x, ray_pos.y, ray_pos.z);
+	// printf("Pixel coord %f %f %f\n", pixel_w_vec.x, pixel_w_vec.y, pixel_w_vec.z);
+
+	// Gaussians
+	const int MAX_GAUSSIANS = 1024;
+	int gaussians[MAX_GAUSSIANS];
+	float gaussian_depths[MAX_GAUSSIANS];
+	int gaussian_idx = 0;
+
+	// Data structures for storing intersections
+	const int BVH_STACK_SIZE = 1024;
+	struct stack_entry stack[BVH_STACK_SIZE];
+	int stack_pointer = 0;
+	int intersection_idx;
+	float intersection_t_near;
+	float intersection_t_far;
+
+	float min_t_near = -FLT_MAX;
+
+	intersection_idx = -1;
+	intersection_t_near = FLT_MAX;
+	intersection_t_far = -FLT_MAX;
+	stack[stack_pointer++] = { .idx=0, .t_near=0.0, .t_far=0.0 };
+
+	while (stack_pointer > 0) {
+		if (stack_pointer >= BVH_STACK_SIZE) {
+			printf("Stack overflow, should not happen\n");
+			break;
+		}
+		struct stack_entry cur = stack[--stack_pointer];
+		int node_addr = cur.idx;
+		float node_t_near = cur.t_near;
+		float node_t_far = cur.t_far;
+
+		// if (node_t_near >= intersection_t_near) { // Found a closer intersection already, so skip this node
+		// 	continue;
+		// }
+
+		if (bvh_nodes[node_addr].object_idx != -1) { // Is a leaf node
+			// printf("Found leaf. Pixel %d %d. Node %d AABB is (%f, %f, %f) (%f, %f, %f), for object %d at times (%f, %f)\n", pixel_x_coord, pixel_y_coord, node_addr, bvh_aabbs[node_addr].x_min, bvh_aabbs[node_addr].y_min, bvh_aabbs[node_addr].z_min, bvh_aabbs[node_addr].x_max, bvh_aabbs[node_addr].y_max, bvh_aabbs[node_addr].z_max, bvh_nodes[node_addr].object_idx, node_t_near, node_t_far);
+			// if (depths[bvh_nodes[node_addr].object_idx] > znear && depths[bvh_nodes[node_addr].object_idx] < zfar) { // Frustrum culling
+			gaussian_depths[gaussian_idx] = depths[bvh_nodes[node_addr].object_idx];
+			gaussians[gaussian_idx++] = bvh_nodes[node_addr].object_idx;
+			if (gaussian_idx == MAX_GAUSSIANS) {
+				break;
+			}
+			// }
+			// if (node_t_near < intersection_t_near) {
+			// 	intersection_t_near = node_t_near;
+			// 	intersection_t_far = node_t_far;
+			// 	intersection_idx = bvh_nodes[node_addr].object_idx;
+			// }
+		} else {
+			int left_idx = bvh_nodes[node_addr].left_idx;
+			int right_idx = bvh_nodes[node_addr].right_idx;
+			HitInfo h1 = ray_bbox_intersect(ray_pos, ray_dir_inv, bvh_aabbs, left_idx, 0.0, FLT_MAX);
+			HitInfo h2 = ray_bbox_intersect(ray_pos, ray_dir_inv, bvh_aabbs, right_idx, 0.0, FLT_MAX);
+			// int first_idx = (h1.t_near < h2.t_near) ? left_idx : right_idx;
+			// int second_idx = (h1.t_near < h2.t_near) ? right_idx : left_idx;
+			// bool hit_first = (h1.t_near < h2.t_near) ? h1.hit : h2.hit;
+			// bool hit_second = (h1.t_near < h2.t_near) ? h2.hit : h1.hit;
+			// float first_t_near = (h1.t_near < h2.t_near) ? h1.t_near : h2.t_near;
+			// float second_t_near = (h1.t_near < h2.t_near) ? h2.t_near : h1.t_near;
+			// float first_t_far = (h1.t_near < h2.t_near) ? h1.t_far : h2.t_far;
+			// float second_t_far = (h1.t_near < h2.t_near) ? h2.t_far : h1.t_far;
+
+			// if (hit_second) {
+			// 	stack[stack_pointer++] = { .idx=second_idx, .t_near=second_t_near, .t_far=second_t_far };
+			// }
+			// if (hit_first) {
+			// 	stack[stack_pointer++] = { .idx=first_idx, .t_near=first_t_near, .t_far=first_t_far };
+			// }
+
+			if (h1.hit) {
+				stack[stack_pointer++] = { .idx=left_idx, .t_near=h1.t_near, .t_far=h1.t_far };
+			}
+			if (h2.hit) {
+				stack[stack_pointer++] = { .idx=right_idx, .t_near=h2.t_near, .t_far=h2.t_far };
+			}
+		}
+	}
+
+	ray_render_composing<CHANNELS>(
+		pixel_x_coord,
+		pixel_y_coord,
+		H,
+		W,
+		gaussian_idx,
+		gaussians,
+		gaussian_depths,
+		means2D,
+		bg_color,
+		colors_precomp,
+		conic_opacity,
+		out_color
+	);
+}
+
 
 void FORWARD::ray_render(
 	const int P,
@@ -1281,6 +1403,9 @@ void FORWARD::ray_render(
 	const float tanfovx,
 	const float tanfovy,
 	const glm::vec3* cam_pos,
+	const int BVH_N,
+	const struct bvh_node* bvh_nodes,
+	const struct bvh_aabb* bvh_aabbs,
 	float *aabbs,
 	// Information used to compute 2D projection color
 	float *means3D,
@@ -1290,9 +1415,36 @@ void FORWARD::ray_render(
 	const float* colors_precomp,
 	float4* conic_opacity,
 	// Output
-	float* out_color)
+	float* out_color,
+	int method,
+	float *benchmark)
 {
-	build_optix_bvh<NUM_CHANNELS> (W, H, P, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths, means2D, bg_color, colors_precomp, conic_opacity, out_color);
+	if (method == 1) {
+		build_optix_bvh<NUM_CHANNELS> (W, H, P, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths, means2D, bg_color, colors_precomp, conic_opacity, out_color, benchmark);
+	} else { // method 2
+		// cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024);
+		dim3 threads_per_block(2, 2);
+		dim3 num_blocks((W + threads_per_block.x - 1) / threads_per_block.x, (H + threads_per_block.y - 1) / threads_per_block.y);
+		ray_render_cuda<NUM_CHANNELS> <<<num_blocks, threads_per_block>>> (
+			P, W, H,
+			znear, zfar,
+			viewmatrix,
+			viewmatrix_inv,
+			projmatrix,
+			tanfovx,
+			tanfovy,
+			cam_pos,
+			BVH_N,
+			bvh_nodes,
+			bvh_aabbs,
+			means2D,
+			bg_color,
+			depths,
+			colors_precomp,
+			conic_opacity,
+			out_color
+		);
+	}
 }
 
 void FORWARD::render(
@@ -1308,7 +1460,6 @@ void FORWARD::render(
 	const float* bg_color,
 	float* out_color)
 {
-	cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024*4);
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,

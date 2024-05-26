@@ -51,10 +51,15 @@ namespace CudaRasterizer
 			const float* cam_pos,
 			const float tan_fovx, float tan_fovy,
 			const bool prefiltered,
+			const int BVH_N,
+			const int* bvh_nodes,
+			const float* bvh_aabbs,
 			float* aabbs,
 			float* out_color,
 			int* radii = nullptr,
-			bool debug = false);
+			bool debug = false,
+			int method = 1,
+			float *benchmark = nullptr);
 
 		static void backward(
 			const int P, int D, int M, int R,
