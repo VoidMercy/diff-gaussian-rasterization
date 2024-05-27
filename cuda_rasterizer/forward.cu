@@ -695,67 +695,123 @@ __global__ void composing_3D(
 	const float segment_length = 0.005f;
 	const int considered_range = 3;
 	bool done = false;
-    float T = 1.0f;  	// Full transmittance initially
-	float t_curr = 0.0f;// Current t along the ray
+    float T = 1.0f;  	 // Full transmittance initially
+	float t_curr = 0.0f; // Current t along the ray
 
 	// Compose gaussians along the ray
     for (int i = 0; !done && i < N_GAUSSIANS; i++) {
         int idx = gaussians[i];
+
+		// Update the current position
 		t_curr = max(t_curr, t_near[i]);
         
 		// Compute each in the gaussian
 		while (t_curr < t_far[i]){
-			// Check overlapping gaussians on the point
-			int overlap_start = max(0, i - considered_range);
-			int overlap_end = min(N_GAUSSIANS, i + considered_range);
+			// Check if near gaussians overlap
+            int overlap_start = max(0, i - considered_range);
+            int overlap_end = min(N_GAUSSIANS, i + considered_range);
+			
+			// Accumulated color and alpha for the current point
+			float local_accumulated_color[CHANNELS] = {0.0f};
+			float local_alpha = 0.0f;
 
 			// Collect influence of all overlapping gaussians
+			for (int near_i = overlap_start; near_i < overlap_end; near_i++) {
+                int near_idx = gaussians[near_i];
+                if (!(t_curr >= t_near[near_i] && t_curr <= t_far[near_i])) continue;
 
-			t_curr += segment_length;
+				float3 gaussian_mean = mean3D[near_idx];
+				float3 sample_point = {
+					ray_origin.x + t_curr * ray_direction.x,
+					ray_origin.y + t_curr * ray_direction.y,
+					ray_origin.z + t_curr * ray_direction.z
+				};
+				float3 diff = {
+					gaussian_mean.x - sample_point.x,
+					gaussian_mean.y - sample_point.y,
+					gaussian_mean.z - sample_point.z
+				};
+
+				float mahalanobis_distance_squared = 
+					diff.x * (diff.x * invCov[near_idx * 6 + 0] + diff.y * invCov[near_idx * 6 + 1] + diff.z * invCov[near_idx * 6 + 2]) +
+					diff.y * (diff.x * invCov[near_idx * 6 + 1] + diff.y * invCov[near_idx * 6 + 3] + diff.z * invCov[near_idx * 6 + 4]) +
+					diff.z * (diff.x * invCov[near_idx * 6 + 2] + diff.y * invCov[near_idx * 6 + 4] + diff.z * invCov[near_idx * 6 + 5]);
+				float power = -0.5f * mahalanobis_distance_squared;
+				if (power > 0) continue;
+
+				float intensity = min(expf(power) * conic_opacity[near_idx].w, 0.99f);
+				if (intensity < 1.0f / 255.0f) continue;
+
+				// Accumlate color of the current point
+				for (int ch = 0; ch < CHANNELS; ch++) {
+					local_accumulated_color[ch] += colors_precomp[near_idx * CHANNELS + ch] * intensity;
+				}
+				// Most opaque object dominate the visibility
+				local_alpha = max(conic_opacity[near_idx].w, local_alpha);
+			}
+
+			// Update transmittance
+			float test_T = T * (1 - local_alpha);
+			if (test_T < 0.0001f) {
+				done = true;
+				break;
+			}
+
+			// Accumulate color using alpha blending
+			for (int ch = 0; ch < CHANNELS; ch++) {
+				accumulated_color[ch] += local_accumulated_color[ch] * T;
+			}
+			
+			t_curr += segment_length; // Update t position
+			T = test_T;				  // Update transmittance
 		}
+	}
 
-		// float3 gaussian_mean = mean3D[idx];
-        // float opacity = conic_opacity[idx].w;
+	// Approximate using mid point
+	// for (int i = 0; !done && i < N_GAUSSIANS; i++) {
+    //     int idx = gaussians[i];
+	// 	float3 gaussian_mean = mean3D[idx];
+    //     float opacity = conic_opacity[idx].w;
 
-		// // Approximate intersection bounds
-		// float t_mid = (t_near[i] + t_far[i]) / 2.0f;
-		// float3 sample_point = {
-		// 	ray_origin.x + t_mid * ray_direction.x,
-		// 	ray_origin.y + t_mid * ray_direction.y,
-		// 	ray_origin.z + t_mid * ray_direction.z
-		// };
+	// 	// Approximate intersection bounds
+	// 	float t_mid = (t_near[i] + t_far[i]) / 2.0f;
+	// 	float3 sample_point = {
+	// 		ray_origin.x + t_mid * ray_direction.x,
+	// 		ray_origin.y + t_mid * ray_direction.y,
+	// 		ray_origin.z + t_mid * ray_direction.z
+	// 	};
 
-		// // Compute power using mahalanobis distance
-		// float3 diff = {
-		// 	gaussian_mean.x - sample_point.x,
-		// 	gaussian_mean.y - sample_point.y,
-		// 	gaussian_mean.z - sample_point.z
-		// };
-		// float mahalanobis_distance_squared = 
-		// 	diff.x * (diff.x * invCov[idx * 6 + 0] + diff.y * invCov[idx * 6 + 1] + diff.z * invCov[idx * 6 + 2]) +
-		// 	diff.y * (diff.x * invCov[idx * 6 + 1] + diff.y * invCov[idx * 6 + 3] + diff.z * invCov[idx * 6 + 4]) +
-		// 	diff.z * (diff.x * invCov[idx * 6 + 2] + diff.y * invCov[idx * 6 + 4] + diff.z * invCov[idx * 6 + 5]);
-		// float power = -0.5f * mahalanobis_distance_squared;
-		// if (power > 0.0f) continue;
+	// 	// Compute power using mahalanobis distance
+	// 	float3 diff = {
+	// 		gaussian_mean.x - sample_point.x,
+	// 		gaussian_mean.y - sample_point.y,
+	// 		gaussian_mean.z - sample_point.z
+	// 	};
+	// 	float mahalanobis_distance_squared = 
+	// 		diff.x * (diff.x * invCov[idx * 6 + 0] + diff.y * invCov[idx * 6 + 1] + diff.z * invCov[idx * 6 + 2]) +
+	// 		diff.y * (diff.x * invCov[idx * 6 + 1] + diff.y * invCov[idx * 6 + 3] + diff.z * invCov[idx * 6 + 4]) +
+	// 		diff.z * (diff.x * invCov[idx * 6 + 2] + diff.y * invCov[idx * 6 + 4] + diff.z * invCov[idx * 6 + 5]);
+	// 	float power = -0.5f * mahalanobis_distance_squared;
+	// 	if (power > 0.0f) continue;
 
-		// // Compute alpha
-		// float sample_alpha = min(expf(power) * opacity, 0.99f);
-		// if (sample_alpha < 1.0f / 255.0f) continue;
+	// 	// Compute alpha
+	// 	float sample_alpha = min(expf(power) * opacity, 0.99f);
+	// 	if (sample_alpha < 1.0f / 255.0f) continue;
 
-		// // Update transmittance
-		// float test_T = T * (1 - sample_alpha);
-		// if (test_T < 0.0001f) {
-		// 	done = true;
-		// 	break;
-		// }
+	// 	// Update transmittance
+	// 	float test_T = T * (1 - sample_alpha);
+	// 	if (test_T < 0.0001f) {
+	// 		done = true;
+	// 		break;
+	// 	}
 
-		// // Accumulate color
-		// for (int ch = 0; ch < CHANNELS; ch++) {
-		// 	accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * sample_alpha * T;
-		// }
+	// 	// Accumulate color
+	// 	for (int ch = 0; ch < CHANNELS; ch++) {
+	// 		accumulated_color[ch] += colors_precomp[idx * CHANNELS + ch] * sample_alpha * T;
+	// 	}
 
-		// T = test_T;	// Update transmittance
-    }
+	// 	T = test_T;	// Update transmittance
+    // }
 
 	__syncthreads();
     int pix_id = y * W + x;
