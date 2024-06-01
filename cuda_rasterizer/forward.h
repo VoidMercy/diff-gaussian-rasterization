@@ -87,6 +87,10 @@ namespace FORWARD
 		const float* colors_precomp,
 		float4* conic_opacity,
 		// Output
+        int* d_gaussians,
+//        int* n_gaussians,
+        float* final_T,
+        uint32_t* n_contrib,
 		float* out_color,
 		int method,
 		float *benchmark);

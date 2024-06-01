@@ -621,6 +621,168 @@ void BACKWARD::preprocess(
 		dL_drot);
 }
 
+
+template <uint32_t CHANNELS>
+__global__ void build_optix_bvh(
+        int W, int H,
+        const float* bg_color,
+        const int* d_gaussians,
+//        const int* n_gaussians,
+        const float2* means2D,
+        const float4* conic_opacity,
+        const float* colors,
+        const float* final_Ts,
+        const uint32_t* n_contrib,
+        const float* dL_dpixels,
+        float3* dL_dmean2D,
+        float4* dL_dconic2D,
+        float* dL_dopacity,
+        float* dL_dcolors)
+{
+    // Backward pass for collect_and_sort
+    int pixel_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel_id >= W * H) {
+        return;
+    }
+    int x = pixel_id % W;
+    int y = pixel_id / W;
+
+//    int N_GAUSSIANS = n_gaussians[pixel_id];
+
+    // In the forward, we stored the final value for T, the
+    // product of all (1 - alpha) factors.
+    const float T_final = final_Ts[pixel_id];  // XXX: check indexing? but should be fine
+    float T = T_final;
+
+    // We start from the back. The ID of the last contributing
+    // Gaussian is known from each pixel from the forward.
+//    unint32_t contributor = N_GAUSSIANS;
+    const int last_contributor = n_contrib[pixel_id];
+
+    float accum_rec[CHANNELS] = { 0 };
+    float dL_dpixel[CHANNELS];
+    for (int i = 0; i < CHANNELS; i++)
+        dL_dpixel[i] = dL_dpixels[i * H * W + pixel_id];  // XXX: check indexing here?
+
+    float last_alpha = 0;
+    float last_color[CHANNELS] = { 0 };
+
+    // Gradient of pixel coordinate w.r.t. normalized
+    // screen-space viewport corrdinates (-1 to 1)
+    const float ddelx_dx = 0.5 * W;
+    const float ddely_dy = 0.5 * H;
+
+    for (int i = last_contributor - 1; i > -1; i--) {
+//        contributor--;
+//        if (contributor >= last_contributor)
+//            continue;
+
+        int index = d_gaussians[i * W * H + pixel_id];
+        float4 con_o = conic_opacity[index];
+        float2 gaussian_mean = means2D[index];
+
+        // Compute power using conic matrix
+        const float2 d = {x - gaussian_mean.x, y - gaussian_mean.y};
+        const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+        if (power > 0.0f)
+            continue;
+
+        // Compute alpha
+        float alpha = min(exp(power) * con_o.w, 0.99f);
+        if (alpha < 1.0f / 255.0f)
+            continue;	// Skip if alpha is too small
+
+        T = T / (1.f - alpha);
+        const float dchannel_dcolor = alpha * T;
+
+        // Propagate gradients to per-Gaussian colors and keep
+        // gradients w.r.t. alpha (blending factor for a Gaussian/pixel
+        // pair).
+        float dL_dalpha = 0.0f;
+        for (int ch = 0; ch < CHANNELS; ch++) {
+            const float c = colors[ch * CHANNELS + i];  // XXX: check indexing?
+            // Update last color (to be used in the next iteration)
+            accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
+
+            const float dL_dchannel = dL_dpixel[ch];
+            dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
+            // Update the gradients w.r.t. color of the Gaussian.
+            // Atomic, since this pixel is just one of potentially
+            // many that were affected by this Gaussian.
+            atomicAdd(&(dL_dcolors[index * CHANNELS + ch]), dchannel_dcolor * dL_dchannel);
+        }
+        dL_dalpha *= T;
+        // Update last alpha (to be used in the next iteration)
+        last_alpha = alpha;
+
+        // Account for fact that alpha also influences how much of
+        // the background color is added if nothing left to blend
+        float bg_dot_dpixel = 0;
+        for (int ch = 0; ch < CHANNELS; ch++)
+            bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
+        dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
+
+        const float G = exp(power);
+        // Helpful reusable temporary variables
+        const float dL_dG = con_o.w * dL_dalpha;
+        const float gdx = G * d.x;
+        const float gdy = G * d.y;
+        const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
+        const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
+
+        // Update gradients w.r.t. 2D mean position of the Gaussian
+        atomicAdd(&dL_dmean2D[index].x, dL_dG * dG_ddelx * ddelx_dx);
+        atomicAdd(&dL_dmean2D[index].y, dL_dG * dG_ddely * ddely_dy);
+
+        // Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
+        atomicAdd(&dL_dconic2D[index].x, -0.5f * gdx * d.x * dL_dG);
+        atomicAdd(&dL_dconic2D[index].y, -0.5f * gdx * d.y * dL_dG);
+        atomicAdd(&dL_dconic2D[index].w, -0.5f * gdy * d.y * dL_dG);
+
+        // Update gradients w.r.t. opacity of the Gaussian
+        atomicAdd(&(dL_dopacity[index]), G * dL_dalpha);
+    }
+}
+
+
+void BACKWARD::ray_render(
+        const dim3 grid, const dim3 block,
+        const uint2* ranges,
+        int W, int H,
+        const float* bg_color,
+        const float2* means2D,
+        const float4* conic_opacity,
+        const float* colors,
+        const int* d_gaussians,
+//        const int* n_gaussians,
+        const float* final_Ts,
+        const uint32_t* n_contrib,
+        const float* dL_dpixels,
+        float3* dL_dmean2D,
+        float4* dL_dconic2D,
+        float* dL_dopacity,
+        float* dL_dcolors)
+{
+    int threads_per_block = 1;
+    int blocks = (W * H + threads_per_block - 1) / threads_per_block;
+    build_optix_bvh<NUM_CHANNELS> <<<blocks, threads_per_block>>>(
+        W, H,
+        bg_color,
+        d_gaussians,
+//        n_gaussians,
+        means2D,
+        conic_opacity,
+        colors,
+        final_Ts,
+        n_contrib,
+        dL_dpixels,
+        dL_dmean2D,
+        dL_dconic2D,
+        dL_dopacity,
+        dL_dcolors
+    );
+}
+
 void BACKWARD::render(
 	const dim3 grid, const dim3 block,
 	const uint2* ranges,

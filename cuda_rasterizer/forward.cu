@@ -512,6 +512,8 @@ __global__ void collect_and_sort(	int W, int H,
 									const float *bg_color,
 				    				const float* colors_precomp,
 									float4 *conic_opacity,
+                                    float* final_T,
+                                    uint32_t* n_contrib,
 									float *out_color
 								) {
 	// int gaussians[1024];
@@ -537,6 +539,7 @@ __global__ void collect_and_sort(	int W, int H,
     // Compose
 	float accumulated_color[CHANNELS] = { 0.0f };
 	float T = 1.0f;  // Start with full transmittance
+    uint32_t last_contributor = 0;
 	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
     for (int i = 0; i < N_GAUSSIANS; i++) {
         int index = d_gaussians[i * W * H + pixel_id];
@@ -565,9 +568,14 @@ __global__ void collect_and_sort(	int W, int H,
 		}
 
         T = test_T;  	// Update the transmittance
+
+        // Keep track of current position in range
+        last_contributor++;
     }
 
     int pix_id = y * W + x;
+    final_T[pix_id] = T;
+    n_contrib[pix_id] = last_contributor;
     for (int ch = 0; ch < CHANNELS; ch++) {
 		out_color[ch * H * W + pix_id] = accumulated_color[ch] + bg_color[ch] * T;
     }
@@ -746,6 +754,10 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 									const float *bg_color,
 									const float* colors_precomp,
 									float4 *conic_opacity,
+                                    int* d_gaussians,
+//                                    int* n_gaussians,
+                                    float* final_T,
+                                    uint32_t* n_contrib,
 									float *out_color,
 									float *benchmark) {
 	auto start = std::chrono::high_resolution_clock::now();
@@ -1115,12 +1127,27 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	start = std::chrono::high_resolution_clock::now();
 	int threads_per_block = 1;
 	int blocks = (W * H + threads_per_block - 1) / threads_per_block;
-	collect_and_sort<CHANNELS> <<<blocks, threads_per_block>>>(W, H, (int *)gaussians, (float *)depths, (int *)n_gaussians, means2D, bg_color, colors_precomp, conic_opacity, out_color);
+	collect_and_sort<CHANNELS> <<<blocks, threads_per_block>>>(
+            W, H,
+            (int *)gaussians,
+            (float *)depths,
+            (int *)n_gaussians,
+            means2D,
+            bg_color,
+            colors_precomp,
+            conic_opacity,
+            final_T,
+            n_contrib,
+            out_color
+    );
 	CHECK_CUDA(cudaDeviceSynchronize(), true);
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
 	printf("Alpha compose took %lf seconds\n", duration.count());
 	benchmark[2] = duration.count();
+
+    // Save for backward pass
+    CHECK_CUDA(cudaMemcpy( (void *)d_gaussians, (void *)gaussians, W*H*sizeof(int)*1024, cudaMemcpyDeviceToHost), true);
 
     CHECK_CUDA(cudaFree((void *)d_output), true);
     CHECK_CUDA(cudaFree((void *)d_temp), true);
@@ -1415,12 +1442,34 @@ void FORWARD::ray_render(
 	const float* colors_precomp,
 	float4* conic_opacity,
 	// Output
+    int* d_gaussians,
+//    int* n_gaussians,
+    float* final_T,
+    uint32_t* n_contrib,
 	float* out_color,
 	int method,
 	float *benchmark)
 {
 	if (method == 1) {
-		build_optix_bvh<NUM_CHANNELS> (W, H, P, (float *)aabbs, (float)tanfovx, (float)tanfovy, (float *)viewmatrix_inv, (float *)cam_pos, (float *)depths, means2D, bg_color, colors_precomp, conic_opacity, out_color, benchmark);
+		build_optix_bvh<NUM_CHANNELS> (
+            W, H, P,
+            (float *)aabbs,
+            (float)tanfovx,
+            (float)tanfovy,
+            (float *)viewmatrix_inv,
+            (float *)cam_pos,
+            (float *)depths,
+            means2D,
+            bg_color,
+            colors_precomp,
+            conic_opacity,
+            d_gaussians,
+//            n_gaussians,
+            final_T,
+            n_contrib,
+            out_color,
+            benchmark
+        );
 	} else { // method 2
 		// cudaError_t err = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1048576ULL*1024);
 		dim3 threads_per_block(2, 2);

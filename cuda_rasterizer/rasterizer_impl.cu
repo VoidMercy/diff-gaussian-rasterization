@@ -175,6 +175,7 @@ CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, s
 	obtain(chunk, img.accum_alpha, N, 128);
 	obtain(chunk, img.n_contrib, N, 128);
 	obtain(chunk, img.ranges, N, 128);
+    obtain(chunk, img.d_gaussians, N * 1024, 128);
 	return img;
 }
 
@@ -308,6 +309,9 @@ int CudaRasterizer::Rasterizer::forward(
 			(colors_precomp != nullptr ? colors_precomp : geomState.rgb),
 			geomState.conic_opacity,
 			// outputs
+            imgState.d_gaussians,
+            imgState.accum_alpha,
+            imgState.n_contrib,
 			out_color,
 			method,
 			benchmark
@@ -420,10 +424,11 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dsh,
 	float* dL_dscale,
 	float* dL_drot,
-	bool debug)
+	bool debug,
+    int method
+    )
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
-	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
 	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);
 
 	if (radii == nullptr)
@@ -441,23 +446,44 @@ void CudaRasterizer::Rasterizer::backward(
 	// opacity and RGB of Gaussians from per-pixel loss gradients.
 	// If we were given precomputed colors and not SHs, use them.
 	const float* color_ptr = (colors_precomp != nullptr) ? colors_precomp : geomState.rgb;
-	CHECK_CUDA(BACKWARD::render(
-		tile_grid,
-		block,
-		imgState.ranges,
-		binningState.point_list,
-		width, height,
-		background,
-		geomState.means2D,
-		geomState.conic_opacity,
-		color_ptr,
-		imgState.accum_alpha,
-		imgState.n_contrib,
-		dL_dpix,
-		(float3*)dL_dmean2D,
-		(float4*)dL_dconic,
-		dL_dopacity,
-		dL_dcolor), debug)
+    if (method == 1 || method == 2) {
+        CHECK_CUDA(BACKWARD::ray_render(
+                tile_grid,
+                block,
+                imgState.ranges,
+                width, height,
+                background,
+                geomState.means2D,
+                geomState.conic_opacity,
+                color_ptr,
+                imgState.d_gaussians,
+                imgState.accum_alpha,
+                imgState.n_contrib,
+                dL_dpix,
+                (float3*)dL_dmean2D,
+                (float4*)dL_dconic,
+                dL_dopacity,
+                dL_dcolor), debug)
+    } else {
+        BinningState binningState = BinningState::fromChunk(binning_buffer, R);
+        CHECK_CUDA(BACKWARD::render(
+                tile_grid,
+                block,
+                imgState.ranges,
+                binningState.point_list,
+                width, height,
+                background,
+                geomState.means2D,
+                geomState.conic_opacity,
+                color_ptr,
+                imgState.accum_alpha,
+                imgState.n_contrib,
+                dL_dpix,
+                (float3*)dL_dmean2D,
+                (float4*)dL_dconic,
+                dL_dopacity,
+                dL_dcolor), debug)
+    }
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,
