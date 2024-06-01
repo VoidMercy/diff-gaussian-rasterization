@@ -1147,7 +1147,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	benchmark[2] = duration.count();
 
     // Save for backward pass
-    CHECK_CUDA(cudaMemcpy( (void *)d_gaussians, (void *)gaussians, W*H*sizeof(int)*1024, cudaMemcpyDeviceToHost), true);
+    CHECK_CUDA(cudaMemcpy( (void *)d_gaussians, (void *)gaussians, W*H*sizeof(int)*1024, cudaMemcpyDeviceToDevice), true);
 
     CHECK_CUDA(cudaFree((void *)d_output), true);
     CHECK_CUDA(cudaFree((void *)d_temp), true);
