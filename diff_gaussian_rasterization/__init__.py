@@ -140,7 +140,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             num_rendered, color, radii, geomBuffer, binningBuffer, imgBuffer, benchmark = _C.rasterize_gaussians(*args)
         # print(color)
         end_time = time.time()
-        print(f"Rasterize took {end_time - start_time} seconds")
+        if raster_settings.debug:
+            print(f"Rasterize took {end_time - start_time} seconds")
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings

@@ -386,7 +386,8 @@ int CudaRasterizer::Rasterizer::forward(
 
 	auto end = std::chrono::high_resolution_clock::now();
 	std::chrono::duration<double> duration = end - start;
-	printf("Total time took: %lf second\n", duration.count());
+    if (debug)
+        printf("Total time took: %lf second\n", duration.count());
 
 	benchmark[0] = duration.count();
 

@@ -651,7 +651,7 @@ __global__ void build_optix_bvh(
 
     // In the forward, we stored the final value for T, the
     // product of all (1 - alpha) factors.
-    const float T_final = final_Ts[pixel_id];  // XXX: check indexing? but should be fine
+    const float T_final = final_Ts[pixel_id];
     float T = T_final;
 
     // We start from the back. The ID of the last contributing
@@ -700,9 +700,11 @@ __global__ void build_optix_bvh(
         // pair).
         float dL_dalpha = 0.0f;
         for (int ch = 0; ch < CHANNELS; ch++) {
-            const float c = colors[ch * CHANNELS + i];  // XXX: check indexing?
+//            const float c = colors[ch * CHANNELS + i];
+            const float c = colors[index * CHANNELS + ch];  // TODO: check indexing?
             // Update last color (to be used in the next iteration)
             accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
+            last_color[ch] = c;
 
             const float dL_dchannel = dL_dpixel[ch];
             dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
@@ -719,7 +721,7 @@ __global__ void build_optix_bvh(
         // the background color is added if nothing left to blend
         float bg_dot_dpixel = 0;
         for (int ch = 0; ch < CHANNELS; ch++)
-            bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
+            bg_dot_dpixel += bg_color[ch] * dL_dpixel[ch];
         dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
 
         const float G = exp(power);

@@ -542,6 +542,9 @@ __global__ void collect_and_sort(	int W, int H,
     uint32_t last_contributor = 0;
 	// Compute the color of the pixel (cf. "Surface Splatting" by Zwicker et al., 2001)
     for (int i = 0; i < N_GAUSSIANS; i++) {
+        // Keep track of current position in range
+        last_contributor++;
+
         int index = d_gaussians[i * W * H + pixel_id];
         float4 con_o = conic_opacity[index];
         float2 gaussian_mean = means2D[index];
@@ -560,6 +563,7 @@ __global__ void collect_and_sort(	int W, int H,
 		// Update transmittance
         float test_T = T * (1 - alpha);
         if (test_T < 0.0001f)
+            last_contributor--;
             break;  	// Stop if transmittance is negligible
 
 		// Accumulate color
@@ -568,9 +572,6 @@ __global__ void collect_and_sort(	int W, int H,
 		}
 
         T = test_T;  	// Update the transmittance
-
-        // Keep track of current position in range
-        last_contributor++;
     }
 
     int pix_id = y * W + x;
@@ -1069,7 +1070,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	// printf("Optix BVH done\n");
 	auto end = std::chrono::high_resolution_clock::now();
 	std::chrono::duration<double> duration = end - start;
-	printf("Optix BVH time taken %lf seconds\n", duration.count());
+//	printf("Optix BVH time taken %lf seconds\n", duration.count());
 	benchmark[3] = duration.count();
 
     // Now we launch ray tracing!
@@ -1120,7 +1121,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 
     end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
-	printf("Ray tracing took %lf seconds\n", duration.count());
+//	printf("Ray tracing took %lf seconds\n", duration.count());
 	benchmark[1] = duration.count();
 
 	// Now we sort and alpha-compose
@@ -1143,7 +1144,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 	CHECK_CUDA(cudaDeviceSynchronize(), true);
 	end = std::chrono::high_resolution_clock::now();
 	duration = end - start;
-	printf("Alpha compose took %lf seconds\n", duration.count());
+//	printf("Alpha compose took %lf seconds\n", duration.count());
 	benchmark[2] = duration.count();
 
     // Save for backward pass
