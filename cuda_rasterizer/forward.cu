@@ -562,9 +562,10 @@ __global__ void collect_and_sort(	int W, int H,
 
 		// Update transmittance
         float test_T = T * (1 - alpha);
-        if (test_T < 0.0001f)
+        if (test_T < 0.0001f) {
             last_contributor--;
             break;  	// Stop if transmittance is negligible
+        }
 
 		// Accumulate color
 		for (int ch = 0; ch < CHANNELS; ch++) {
