@@ -184,7 +184,7 @@ extern "C" __global__ void __intersection__is() {
     float3 ray_pos = optixGetWorldRayOrigin();
     float3 ray_dir = optixGetWorldRayDirection();
 
-    // float depth = depths[primitive_idx];
+    float depth = depths[primitive_idx];
     float *aabb = &data[6 * primitive_idx];
 
     float3 *bbox_min_ptr = (float3 *)aabb;
@@ -201,7 +201,7 @@ extern "C" __global__ void __intersection__is() {
     float t_near = max(max(t1.x, t1.y), t1.z);
     float t_far = min(min(t2.x, t2.y), t2.z);
 
-    if (t_far > ray_tmin && t_far < ray_tmax) {
+    if (t_far > ray_tmin && t_far < ray_tmax && depth >= 0.2) {
         optixReportIntersection(t_far, 0, *((unsigned int *)&t_near), *((unsigned int *)&t_far));
     }
 }

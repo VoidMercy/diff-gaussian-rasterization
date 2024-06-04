@@ -46,76 +46,10 @@
 	ret;
 
 }
-	// .globl	__direct_callable__dc
-.visible .func __direct_callable__dc(
-	.param .b32 __direct_callable__dc_param_0,
-	.param .b64 __direct_callable__dc_param_1,
-	.param .b64 __direct_callable__dc_param_2
-)
-{
-	.reg .pred 	%p<6>;
-	.reg .b32 	%r<23>;
-	.reg .b64 	%rd<18>;
-
-
-	ld.param.u32 	%r10, [__direct_callable__dc_param_0];
-	ld.param.u64 	%rd11, [__direct_callable__dc_param_1];
-	ld.param.u64 	%rd12, [__direct_callable__dc_param_2];
-	setp.lt.s32 	%p1, %r10, 1;
-	@%p1 bra 	$L__BB1_7;
-
-	add.s32 	%r12, %r10, -1;
-	and.b32  	%r22, %r10, 3;
-	setp.lt.u32 	%p2, %r12, 3;
-	mov.u32 	%r21, 0;
-	@%p2 bra 	$L__BB1_4;
-
-	sub.s32 	%r20, %r10, %r22;
-	mov.u64 	%rd14, %rd11;
-	mov.u64 	%rd15, %rd12;
-
-$L__BB1_3:
-	ld.u32 	%r14, [%rd15];
-	st.u32 	[%rd14], %r14;
-	ld.u32 	%r15, [%rd15+4];
-	st.u32 	[%rd14+4], %r15;
-	ld.u32 	%r16, [%rd15+8];
-	st.u32 	[%rd14+8], %r16;
-	ld.u32 	%r17, [%rd15+12];
-	st.u32 	[%rd14+12], %r17;
-	add.s32 	%r21, %r21, 4;
-	add.s64 	%rd15, %rd15, 16;
-	add.s64 	%rd14, %rd14, 16;
-	add.s32 	%r20, %r20, -4;
-	setp.ne.s32 	%p3, %r20, 0;
-	@%p3 bra 	$L__BB1_3;
-
-$L__BB1_4:
-	setp.eq.s32 	%p4, %r22, 0;
-	@%p4 bra 	$L__BB1_7;
-
-	mul.wide.s32 	%rd13, %r21, 4;
-	add.s64 	%rd17, %rd11, %rd13;
-	add.s64 	%rd16, %rd12, %rd13;
-
-$L__BB1_6:
-	.pragma "nounroll";
-	ld.u32 	%r18, [%rd16];
-	st.u32 	[%rd17], %r18;
-	add.s64 	%rd17, %rd17, 4;
-	add.s64 	%rd16, %rd16, 4;
-	add.s32 	%r22, %r22, -1;
-	setp.ne.s32 	%p5, %r22, 0;
-	@%p5 bra 	$L__BB1_6;
-
-$L__BB1_7:
-	ret;
-
-}
 	// .globl	__raygen__rg
 .visible .entry __raygen__rg()
 {
-	.local .align 16 .b8 	__local_depot2[4128];
+	.local .align 16 .b8 	__local_depot1[4128];
 	.reg .b64 	%SP;
 	.reg .b64 	%SPL;
 	.reg .pred 	%p<10>;
@@ -124,7 +58,7 @@ $L__BB1_7:
 	.reg .b64 	%rd<39>;
 
 
-	mov.u64 	%SPL, __local_depot2;
+	mov.u64 	%SPL, __local_depot1;
 	cvta.local.u64 	%SP, %SPL;
 	add.u64 	%rd9, %SP, 0;
 	add.u64 	%rd1, %SPL, 0;
@@ -213,7 +147,7 @@ $L__BB1_7:
 	mov.u32 	%r154, %r44;
 	mov.f32 	%f69, %f9;
 
-$L__BB2_1:
+$L__BB1_1:
 	mov.f32 	%f66, 0f5A0E1BCA;
 	mov.u32 	%r86, 255;
 	mov.u32 	%r91, 8;
@@ -227,15 +161,15 @@ $L__BB2_1:
 	setp.lt.s32 	%p2, %r155, 1024;
 	and.pred  	%p3, %p2, %p1;
 	mov.u32 	%r146, %r155;
-	@%p3 bra 	$L__BB2_1;
+	@%p3 bra 	$L__BB1_1;
 
 	setp.lt.s32 	%p4, %r155, 1025;
-	@%p4 bra 	$L__BB2_4;
+	@%p4 bra 	$L__BB1_4;
 
 	mov.u32 	%r155, 1024;
 	st.local.u32 	[%rd1], %r155;
 
-$L__BB2_4:
+$L__BB1_4:
 	mad.lo.s32 	%r30, %r51, %r45, %r44;
 	ld.const.u64 	%rd20, [params+8];
 	cvta.to.global.u64 	%rd21, %rd20;
@@ -243,7 +177,7 @@ $L__BB2_4:
 	add.s64 	%rd23, %rd21, %rd22;
 	st.global.u32 	[%rd23], %r155;
 	setp.lt.s32 	%p5, %r155, 1;
-	@%p5 bra 	$L__BB2_11;
+	@%p5 bra 	$L__BB1_11;
 
 	ld.const.u64 	%rd24, [params];
 	cvta.to.global.u64 	%rd5, %rd24;
@@ -251,11 +185,11 @@ $L__BB2_4:
 	add.s32 	%r126, %r155, -1;
 	setp.lt.u32 	%p6, %r126, 3;
 	mov.u32 	%r158, 0;
-	@%p6 bra 	$L__BB2_8;
+	@%p6 bra 	$L__BB1_8;
 
 	sub.s32 	%r157, %r155, %r160;
 
-$L__BB2_7:
+$L__BB1_7:
 	mul.wide.s32 	%rd25, %r158, 4;
 	add.s64 	%rd26, %rd2, %rd25;
 	ld.local.v4.u32 	{%r128, %r129, %r130, %r131}, [%rd26];
@@ -282,11 +216,11 @@ $L__BB2_7:
 	add.s32 	%r158, %r158, 4;
 	add.s32 	%r157, %r157, -4;
 	setp.ne.s32 	%p7, %r157, 0;
-	@%p7 bra 	$L__BB2_7;
+	@%p7 bra 	$L__BB1_7;
 
-$L__BB2_8:
+$L__BB1_8:
 	setp.eq.s32 	%p8, %r160, 0;
-	@%p8 bra 	$L__BB2_11;
+	@%p8 bra 	$L__BB1_11;
 
 	mad.lo.s32 	%r144, %r52, %r158, %r45;
 	mad.lo.s32 	%r159, %r51, %r144, %r44;
@@ -294,7 +228,7 @@ $L__BB2_8:
 	mul.wide.s32 	%rd35, %r158, 4;
 	add.s64 	%rd38, %rd2, %rd35;
 
-$L__BB2_10:
+$L__BB1_10:
 	.pragma "nounroll";
 	ld.local.u32 	%r145, [%rd38];
 	mul.wide.u32 	%rd36, %r159, 4;
@@ -304,9 +238,9 @@ $L__BB2_10:
 	add.s64 	%rd38, %rd38, 4;
 	add.s32 	%r160, %r160, -1;
 	setp.ne.s32 	%p9, %r160, 0;
-	@%p9 bra 	$L__BB2_10;
+	@%p9 bra 	$L__BB1_10;
 
-$L__BB2_11:
+$L__BB1_11:
 	ret;
 
 }
@@ -425,10 +359,11 @@ $L__BB2_11:
 	// .globl	__intersection__is
 .visible .entry __intersection__is()
 {
-	.reg .pred 	%p<14>;
-	.reg .f32 	%f<38>;
+	.reg .pred 	%p<16>;
+	.reg .f32 	%f<39>;
 	.reg .b32 	%r<7>;
-	.reg .b64 	%rd<5>;
+	.reg .f64 	%fd<2>;
+	.reg .b64 	%rd<9>;
 
 
 	// begin inline asm
@@ -440,7 +375,11 @@ $L__BB2_11:
 	// begin inline asm
 	call (%rd1), _optix_get_sbt_data_ptr_64, ();
 	// end inline asm
-	ld.u64 	%rd2, [%rd1];
+	ld.u64 	%rd3, [%rd1];
+	// begin inline asm
+	call (%rd2), _optix_get_sbt_data_ptr_64, ();
+	// end inline asm
+	ld.u64 	%rd4, [%rd2+8];
 	// begin inline asm
 	call (%r1), _optix_read_primitive_idx, ();
 	// end inline asm
@@ -462,25 +401,27 @@ $L__BB2_11:
 	// begin inline asm
 	call (%f10), _optix_get_world_ray_direction_z, ();
 	// end inline asm
+	mul.wide.u32 	%rd5, %r1, 4;
+	add.s64 	%rd6, %rd4, %rd5;
 	mul.lo.s32 	%r2, %r1, 6;
-	mul.wide.u32 	%rd3, %r2, 4;
-	add.s64 	%rd4, %rd2, %rd3;
-	ld.f32 	%f11, [%rd4];
+	mul.wide.u32 	%rd7, %r2, 4;
+	add.s64 	%rd8, %rd3, %rd7;
+	ld.f32 	%f11, [%rd8];
 	sub.ftz.f32 	%f12, %f11, %f5;
 	div.approx.ftz.f32 	%f13, %f12, %f8;
-	ld.f32 	%f14, [%rd4+4];
+	ld.f32 	%f14, [%rd8+4];
 	sub.ftz.f32 	%f15, %f14, %f6;
 	div.approx.ftz.f32 	%f16, %f15, %f9;
-	ld.f32 	%f17, [%rd4+8];
+	ld.f32 	%f17, [%rd8+8];
 	sub.ftz.f32 	%f18, %f17, %f7;
 	div.approx.ftz.f32 	%f19, %f18, %f10;
-	ld.f32 	%f20, [%rd4+12];
+	ld.f32 	%f20, [%rd8+12];
 	sub.ftz.f32 	%f21, %f20, %f5;
 	div.approx.ftz.f32 	%f22, %f21, %f8;
-	ld.f32 	%f23, [%rd4+16];
+	ld.f32 	%f23, [%rd8+16];
 	sub.ftz.f32 	%f24, %f23, %f6;
 	div.approx.ftz.f32 	%f25, %f24, %f9;
-	ld.f32 	%f26, [%rd4+20];
+	ld.f32 	%f26, [%rd8+20];
 	sub.ftz.f32 	%f27, %f26, %f7;
 	div.approx.ftz.f32 	%f28, %f27, %f10;
 	setp.lt.ftz.f32 	%p1, %f13, %f22;
@@ -506,7 +447,11 @@ $L__BB2_11:
 	setp.leu.ftz.f32 	%p11, %f2, %f3;
 	setp.geu.ftz.f32 	%p12, %f2, %f4;
 	or.pred  	%p13, %p11, %p12;
-	@%p13 bra 	$L__BB6_2;
+	ld.f32 	%f37, [%rd6];
+	cvt.ftz.f64.f32 	%fd1, %f37;
+	setp.ltu.f64 	%p14, %fd1, 0d3FC999999999999A;
+	or.pred  	%p15, %p14, %p13;
+	@%p15 bra 	$L__BB5_2;
 
 	mov.b32 	%r5, %f1;
 	mov.b32 	%r6, %f2;
@@ -515,7 +460,7 @@ $L__BB2_11:
 	call (%r3), _optix_report_intersection_2, (%f2, %r4, %r5, %r6);
 	// end inline asm
 
-$L__BB6_2:
+$L__BB5_2:
 	ret;
 
 }
