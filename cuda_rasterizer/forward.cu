@@ -1127,7 +1127,7 @@ void build_optix_bvh(const int W, const int H, const int P, float *d_aabbBuffer,
 
 	// Now we sort and alpha-compose
 	start = std::chrono::high_resolution_clock::now();
-	int threads_per_block = 1;
+	int threads_per_block = 256;
 	int blocks = (W * H + threads_per_block - 1) / threads_per_block;
 	collect_and_sort<CHANNELS> <<<blocks, threads_per_block>>>(
             W, H,

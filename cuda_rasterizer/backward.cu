@@ -765,7 +765,7 @@ void BACKWARD::ray_render(
         float* dL_dopacity,
         float* dL_dcolors)
 {
-    int threads_per_block = 1;
+    int threads_per_block = 256;
     int blocks = (W * H + threads_per_block - 1) / threads_per_block;
     build_optix_bvh<NUM_CHANNELS> <<<blocks, threads_per_block>>>(
         W, H,
