@@ -344,12 +344,12 @@ $L__BB1_11:
 	call (%r17), _optix_read_primitive_idx, ();
 	// end inline asm
 	// begin inline asm
-	call (%r19), _optix_get_attribute_1, ();
+	call (%r18), _optix_get_attribute_0, ();
 	// end inline asm
 	ld.u32 	%r20, [%rd3];
 	add.s32 	%r21, %r20, 1;
 	st.u32 	[%rd3], %r21;
-	st.u32 	[%rd9], %r19;
+	st.u32 	[%rd9], %r18;
 	mul.wide.s32 	%rd10, %r20, 4;
 	add.s64 	%rd11, %rd6, %rd10;
 	st.u32 	[%rd11], %r17;
@@ -444,8 +444,8 @@ $L__BB1_11:
 	selp.f32 	%f36, %f32, %f33, %p9;
 	setp.lt.ftz.f32 	%p10, %f36, %f34;
 	selp.f32 	%f2, %f36, %f34, %p10;
-	setp.leu.ftz.f32 	%p11, %f2, %f3;
-	setp.geu.ftz.f32 	%p12, %f2, %f4;
+	setp.leu.ftz.f32 	%p11, %f1, %f3;
+	setp.geu.ftz.f32 	%p12, %f1, %f4;
 	or.pred  	%p13, %p11, %p12;
 	ld.f32 	%f37, [%rd6];
 	cvt.ftz.f64.f32 	%fd1, %f37;
@@ -453,11 +453,11 @@ $L__BB1_11:
 	or.pred  	%p15, %p14, %p13;
 	@%p15 bra 	$L__BB5_2;
 
-	mov.b32 	%r5, %f1;
 	mov.b32 	%r6, %f2;
+	mov.b32 	%r5, %f1;
 	mov.u32 	%r4, 0;
 	// begin inline asm
-	call (%r3), _optix_report_intersection_2, (%f2, %r4, %r5, %r6);
+	call (%r3), _optix_report_intersection_2, (%f1, %r4, %r5, %r6);
 	// end inline asm
 
 $L__BB5_2:
